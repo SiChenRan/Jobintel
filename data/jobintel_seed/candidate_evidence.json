@@ -1,0 +1,102 @@
+[
+  {
+    "candidate_id": "C001",
+    "profile_version": 1,
+    "evidence_id": "ev-python-api",
+    "evidence_type": "experience",
+    "title": "Backend Engineer",
+    "content": "Built Python and PostgreSQL APIs for two years.",
+    "skills": ["Python", "PostgreSQL", "REST APIs"],
+    "source_order": 0
+  },
+  {
+    "candidate_id": "C001",
+    "profile_version": 1,
+    "evidence_id": "ev-cs-degree",
+    "evidence_type": "education",
+    "title": "BSc Computer Science",
+    "content": "Completed a bachelor degree in computer science.",
+    "skills": [],
+    "source_order": 1
+  },
+  {
+    "candidate_id": "C001",
+    "profile_version": 2,
+    "evidence_id": "ev-python-api",
+    "evidence_type": "experience",
+    "title": "Senior Backend Engineer",
+    "content": "Built and operated Python and PostgreSQL APIs for four years.",
+    "skills": ["Python", "PostgreSQL", "FastAPI"],
+    "source_order": 0
+  },
+  {
+    "candidate_id": "C001",
+    "profile_version": 2,
+    "evidence_id": "ev-atlas-platform",
+    "evidence_type": "project",
+    "title": "Atlas ML Platform",
+    "content": "Deployed PyTorch services to Kubernetes and introduced model monitoring.",
+    "skills": ["PyTorch", "Kubernetes", "MLOps"],
+    "source_order": 1
+  },
+  {
+    "candidate_id": "C001",
+    "profile_version": 2,
+    "evidence_id": "ev-cuda-course",
+    "evidence_type": "certificate",
+    "title": "CUDA Performance Certificate",
+    "content": "Completed practical CUDA kernel profiling and optimization coursework.",
+    "skills": ["CUDA", "GPU profiling"],
+    "source_order": 2
+  },
+  {
+    "candidate_id": "C001",
+    "profile_version": 2,
+    "evidence_id": "ev-cs-degree",
+    "evidence_type": "education",
+    "title": "BSc Computer Science",
+    "content": "Completed a bachelor degree in computer science.",
+    "skills": [],
+    "source_order": 3
+  },
+  {
+    "candidate_id": "C001",
+    "profile_version": 2,
+    "evidence_id": "ev-python-skill",
+    "evidence_type": "skill",
+    "title": "Python",
+    "content": "Uses Python daily for backend services, automation, and data tooling.",
+    "skills": ["Python"],
+    "source_order": 4
+  },
+  {
+    "candidate_id": "C002",
+    "profile_version": 1,
+    "evidence_id": "ev-apac-program",
+    "evidence_type": "experience",
+    "title": "APAC Transformation Lead",
+    "content": "Led a three-year cloud migration across six engineering and operations teams.",
+    "skills": ["Program management", "Cloud migration"],
+    "source_order": 0
+  },
+  {
+    "candidate_id": "C002",
+    "profile_version": 1,
+    "evidence_id": "ev-bilingual",
+    "evidence_type": "skill",
+    "title": "Mandarin and English",
+    "content": "Conducts executive workshops in Mandarin and English.",
+    "skills": ["Mandarin", "English"],
+    "source_order": 1
+  },
+  {
+    "candidate_id": "C002",
+    "profile_version": 1,
+    "evidence_id": "ev-pmp-expired",
+    "evidence_type": "certificate",
+    "title": "PMP certification (expired)",
+    "content": "PMP certification expired in 2024 and has not been renewed.",
+    "skills": ["PMP"],
+    "source_order": 2
+  }
+]

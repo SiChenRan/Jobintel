@@ -1,0 +1,20 @@
+[
+  {
+    "candidate_id": "C001",
+    "profile_version": 1,
+    "summary": "Backend engineer before completing the Atlas platform project.",
+    "created_at": "2026-06-01T00:00:00Z"
+  },
+  {
+    "candidate_id": "C001",
+    "profile_version": 2,
+    "summary": "Backend and ML platform engineer with production ownership.",
+    "created_at": "2026-08-20T00:00:00Z"
+  },
+  {
+    "candidate_id": "C002",
+    "profile_version": 1,
+    "summary": "Technical program manager working across APAC.",
+    "created_at": "2026-08-15T00:00:00Z"
+  }
+]

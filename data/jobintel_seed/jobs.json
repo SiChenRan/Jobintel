@@ -1,0 +1,123 @@
+[
+  {
+    "job_id": "J001",
+    "job_version": 1,
+    "company_id": "co-orbit",
+    "company_name": "Orbit Systems",
+    "title": "Backend Platform Engineer",
+    "location": "Shanghai / Hybrid",
+    "employment_type": "full_time",
+    "description": "Build reliable Python services and the platform used to deploy them.",
+    "requirements": [
+      {
+        "text": "Strong production Python skills",
+        "category": "skill",
+        "importance": "must",
+        "normalized_skill": "Python",
+        "source_order": 0
+      },
+      {
+        "text": "At least three years building production APIs",
+        "category": "experience",
+        "importance": "must",
+        "source_order": 1
+      },
+      {
+        "text": "Experience with PostgreSQL",
+        "category": "skill",
+        "importance": "preferred",
+        "normalized_skill": "PostgreSQL",
+        "source_order": 2
+      },
+      {
+        "text": "Kubernetes deployment experience",
+        "category": "skill",
+        "importance": "bonus",
+        "normalized_skill": "Kubernetes",
+        "source_order": 3
+      }
+    ],
+    "source_url": "https://jobs.example.com/J001",
+    "created_at": "2026-08-01T00:00:00Z"
+  },
+  {
+    "job_id": "J002",
+    "job_version": 1,
+    "company_id": "co-nova",
+    "company_name": "Nova Intelligence",
+    "title": "Machine Learning Engineer",
+    "location": "Shenzhen",
+    "employment_type": "full_time",
+    "description": "Train, evaluate, optimize, and operate deep-learning models.",
+    "requirements": [
+      {
+        "text": "Hands-on PyTorch model development",
+        "category": "skill",
+        "importance": "must",
+        "normalized_skill": "PyTorch",
+        "source_order": 0
+      },
+      {
+        "text": "Experience operating machine-learning systems in production",
+        "category": "experience",
+        "importance": "must",
+        "source_order": 1
+      },
+      {
+        "text": "CUDA performance optimization",
+        "category": "skill",
+        "importance": "preferred",
+        "normalized_skill": "CUDA",
+        "source_order": 2
+      },
+      {
+        "text": "Graduate degree in computer science or a related field",
+        "category": "education",
+        "importance": "preferred",
+        "source_order": 3
+      }
+    ],
+    "source_url": "https://jobs.example.com/J002",
+    "created_at": "2026-08-05T00:00:00Z"
+  },
+  {
+    "job_id": "J003",
+    "job_version": 1,
+    "company_id": "co-meridian",
+    "company_name": "Meridian Global",
+    "title": "Technical Program Manager",
+    "location": "Singapore / Remote APAC",
+    "employment_type": "full_time",
+    "description": "Lead multilingual cloud-transformation programs across APAC.",
+    "requirements": [
+      {
+        "text": "Led complex cross-functional technology programs",
+        "category": "experience",
+        "importance": "must",
+        "source_order": 0
+      },
+      {
+        "text": "Professional fluency in Mandarin and English",
+        "category": "language",
+        "importance": "must",
+        "source_order": 1
+      },
+      {
+        "text": "Delivered a large cloud migration",
+        "category": "project",
+        "importance": "preferred",
+        "normalized_skill": "Cloud migration",
+        "source_order": 2
+      },
+      {
+        "text": "Current PMP certification",
+        "category": "education",
+        "importance": "bonus",
+        "normalized_skill": "PMP",
+        "source_order": 3
+      }
+    ],
+    "source_url": "https://jobs.example.com/J003",
+    "created_at": "2026-08-10T00:00:00Z"
+  }
+]

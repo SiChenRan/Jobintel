@@ -1,0 +1,26 @@
+[
+  {
+    "company_id": "co-orbit",
+    "name": "Orbit Systems",
+    "industry": "Cloud Infrastructure",
+    "headquarters": "Shanghai",
+    "website": "https://orbit.example.com",
+    "description": "Builds cloud platforms for high-growth product teams."
+  },
+  {
+    "company_id": "co-nova",
+    "name": "Nova Intelligence",
+    "industry": "Artificial Intelligence",
+    "headquarters": "Shenzhen",
+    "website": "https://nova.example.com",
+    "description": "Develops production machine-learning systems and developer tools."
+  },
+  {
+    "company_id": "co-meridian",
+    "name": "Meridian Global",
+    "industry": "Enterprise Services",
+    "headquarters": "Singapore",
+    "website": "https://meridian.example.com",
+    "description": "Runs cross-border enterprise transformation programs."
+  }
+]

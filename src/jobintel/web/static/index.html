@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>JobIntel · 求职工作台</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">JI</div>
+        <div><strong>JobIntel</strong><span>求职情报工作台</span></div>
+      </div>
+      <nav class="nav" aria-label="主要导航">
+        <button class="nav-item active" data-view="dashboard"><span>⌂</span>工作台</button>
+        <button class="nav-item" data-view="profiles"><span>◎</span>候选人档案</button>
+        <button class="nav-item" data-view="discovery"><span>⌕</span>发现职位</button>
+        <button class="nav-item" data-view="analyses"><span>◇</span>深入分析</button>
+        <button class="nav-item" data-view="radar"><span>◉</span>职位雷达</button>
+      </nav>
+      <div class="sidebar-note">
+        <span class="status-dot" id="browser-dot"></span>
+        <div><strong id="browser-status">正在检查浏览器</strong><small>BOSS 本地连接</small></div>
+      </div>
+      <p class="privacy-note">数据只保存在这台服务器。页面默认不对公网开放。</p>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button id="menu-button" class="icon-button" aria-label="打开导航">☰</button>
+        <div><p class="eyebrow" id="view-eyebrow">OVERVIEW</p><h1 id="view-title">求职工作台</h1></div>
+        <div class="top-actions"><span class="provider-pill">模型 <b id="provider-name">—</b></span><button class="button secondary" id="refresh-button">刷新</button></div>
+      </header>
+
+      <section class="view active" id="view-dashboard">
+        <div class="hero">
+          <div><p class="eyebrow">TODAY'S FOCUS</p><h2>从真实职位开始，做有证据的选择。</h2><p>先完善候选人档案，再发现职位、深入分析，并用低频雷达持续追踪变化。</p></div>
+          <button class="button primary large" data-go="discovery">开始找职位 <span>→</span></button>
+        </div>
+        <div class="metric-grid" id="metrics"></div>
+        <div class="dashboard-grid">
+          <article class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">WORKFLOW</p><h3>推荐流程</h3></div></div>
+            <div class="workflow">
+              <button data-go="profiles"><b>01</b><span><strong>建立真实档案</strong><small>上传简历并确认可引用证据</small></span><i>→</i></button>
+              <button data-go="discovery"><b>02</b><span><strong>发现匹配职位</strong><small>连接 BOSS，筛选并排序真实岗位</small></span><i>→</i></button>
+              <button data-go="analyses"><b>03</b><span><strong>深入分析机会</strong><small>查看匹配证据、短板和行动建议</small></span><i>→</i></button>
+              <button data-go="radar"><b>04</b><span><strong>低频持续追踪</strong><small>发现新增、变化和疑似下线</small></span><i>→</i></button>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-heading"><div><p class="eyebrow">RECENT</p><h3>最近搜索</h3></div><button class="text-button" data-go="discovery">查看全部</button></div>
+            <div id="recent-discoveries" class="compact-list empty-state">暂无搜索记录</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-profiles">
+        <div class="section-intro"><div><p class="eyebrow">CANDIDATE EVIDENCE</p><h2>候选人档案</h2><p>从真实简历提取可引用证据。预览不会入库，只有确认后才创建新版本。</p></div></div>
+        <div class="two-column">
+          <article class="panel form-panel">
+            <div class="panel-heading"><div><span class="step-tag">第一步</span><h3>上传并解析简历</h3></div></div>
+            <form id="profile-form">
+              <label>候选人 ID<input name="candidate_id" required placeholder="例如 C001"></label>
+              <label>简历文件<input name="resume" required type="file" accept=".pdf,.txt,.md,.markdown"></label>
+              <label>分析模型<select name="provider"><option value="">使用系统默认</option><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select></label>
+              <p class="field-help">支持文本型 PDF、TXT、Markdown，最大 10 MiB。扫描 PDF 请先 OCR。</p>
+              <button class="button primary full" type="submit">生成档案预览</button>
+            </form>
+          </article>
+          <article class="panel preview-panel">
+            <div class="panel-heading"><div><span class="step-tag muted">第二步</span><h3>审核并确认</h3></div></div>
+            <div id="profile-preview" class="empty-state tall"><span class="empty-icon">▤</span><strong>等待简历解析</strong><p>解析后的摘要和证据会显示在这里。</p></div>
+          </article>
+        </div>
+        <article class="panel history-panel"><div class="panel-heading"><div><p class="eyebrow">PROFILES</p><h3>当前档案</h3></div></div><div id="profile-list" class="card-list"></div></article>
+      </section>
+
+      <section class="view" id="view-discovery">
+        <div class="section-intro"><div><p class="eyebrow">LIVE FROM BOSS</p><h2>发现真实职位</h2><p>在已登录的本地 Chrome 中搜索。分页与详情抓取继续执行随机延时和风控熔断。</p></div></div>
+        <article class="panel search-panel">
+          <form id="discovery-form">
+            <div class="form-grid primary-fields">
+              <label>候选人<select name="candidate_id" id="candidate-select" required></select></label>
+              <label class="wide">职位关键词<input name="query" required placeholder="例如 Agent 开发实习"></label>
+              <label>城市<input name="city" placeholder="北京"></label>
+              <label>职位类型<select name="employment_type"><option value="">不限</option><option value="internship">实习</option><option value="full_time">全职</option><option value="part_time">兼职</option><option value="other">其他/未知</option></select></label>
+            </div>
+            <details>
+              <summary>更多筛选条件</summary>
+              <div class="form-grid advanced-fields">
+                <label>月薪最低（K）<input name="salary_min_k" type="number" min="0" placeholder="20"></label>
+                <label>月薪最高（K）<input name="salary_max_k" type="number" min="0" placeholder="40"></label>
+                <label>日薪最低（元）<input name="daily_salary_min_yuan" type="number" min="0" placeholder="200"></label>
+                <label>日薪最高（元）<input name="daily_salary_max_yuan" type="number" min="0" placeholder="400"></label>
+                <label>学历标签<input name="education" placeholder="本科，可用逗号分隔"></label>
+                <label>经验标签<input name="experience" placeholder="不限，应届生"></label>
+                <label class="wide">自定义排除词<input name="exclusions" placeholder="保险销售，课程顾问"></label>
+                <label>结果数量<input name="limit" type="number" min="1" max="500" value="50"></label>
+                <label>补全详情数<input name="detail_top" type="number" min="0" max="10" value="3"></label>
+              </div>
+              <div class="check-row">
+                <label><input type="checkbox" name="exclude_outsourcing">排除外包/驻场</label>
+                <label><input type="checkbox" name="exclude_training">排除培训机构</label>
+                <label><input type="checkbox" name="exclude_agency">排除中介/猎头</label>
+                <label><input type="checkbox" name="strict_salary">排除薪资面议</label>
+              </div>
+            </details>
+            <div class="form-actions"><p><span class="safe-dot"></span>最多补全 10 条详情，触发验证后立即停止</p><button class="button primary" type="submit">搜索 BOSS 职位 <span>→</span></button></div>
+          </form>
+        </article>
+        <div id="discovery-result" class="results-wrap"><div class="empty-state tall"><span class="empty-icon">⌕</span><strong>设置条件，开始搜索</strong><p>结果会按候选人证据和职位关键词确定性排序。</p></div></div>
+      </section>
+
+      <section class="view" id="view-analyses">
+        <div class="section-intro"><div><p class="eyebrow">EVIDENCE-BASED DECISIONS</p><h2>深入分析</h2><p>分析已保存职位，不重复访问 BOSS。分数由程序计算，判断必须引用候选人证据。</p></div><button class="button secondary" id="reload-analyses">刷新列表</button></div>
+        <div id="analysis-list" class="analysis-grid"></div>
+      </section>
+
+      <section class="view" id="view-radar">
+        <div class="section-intro"><div><p class="eyebrow">LOW-FREQUENCY MONITORING</p><h2>职位雷达</h2><p>基于一次成功搜索做增量检查。默认至少间隔 6 小时，异常零结果不会批量标记下线。</p></div></div>
+        <div class="two-column radar-layout">
+          <article class="panel form-panel">
+            <div class="panel-heading"><div><h3>创建雷达检查</h3><p>请选择一次历史搜索或最新雷达结果作为基线。</p></div></div>
+            <form id="radar-form">
+              <label>基线搜索<select name="baseline_run_id" id="radar-baseline" required></select></label>
+              <label>补全详情数<input name="detail_top" type="number" min="0" max="10" value="0"></label>
+              <p class="field-help">雷达会复用原搜索的全部筛选条件。请勿频繁绕过冷却时间。</p>
+              <button class="button primary full" type="submit">检查职位变化</button>
+            </form>
+          </article>
+          <article class="panel"><div class="panel-heading"><div><h3>最近雷达</h3></div></div><div id="radar-list" class="compact-list"></div></article>
+        </div>
+        <div id="radar-result"></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="detail-dialog"><button class="dialog-close" aria-label="关闭">×</button><div id="dialog-content"></div></dialog>
+  <div class="loading" id="loading" aria-live="polite"><div class="loader"></div><strong id="loading-text">正在处理…</strong><small>请保持页面开启</small></div>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
