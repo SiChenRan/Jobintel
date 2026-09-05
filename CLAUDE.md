@@ -25,10 +25,12 @@ Focused tests can be run with `uv run pytest tests/jobintel/<file>.py`. Tests us
 - `jobintel.agent` owns the provider-neutral tool loop, guardrails, provenance, and finalization.
 - `jobintel.providers` contains the neutral provider protocol plus Anthropic, OpenAI, and DeepSeek adapters.
 - `jobintel.tool_contracts` is the single source for in-process and FastMCP tool schemas.
+- `jobintel.outreach` owns HR outreach draft contracts, stable identities, review-state transitions, channel rendering, prompts, and deterministic evidence guardrails. It must not operate BOSS chat controls.
+- `jobintel.notifications` owns candidate-scoped SMTP delivery for saved discovery results. Recipient addresses are persisted only as candidate preferences; delivery endpoints must resolve them from the discovery's candidate and must not accept recipient overrides. Never persist message bodies or SMTP credentials.
 - `jobintel.discovery` contains the Chrome CDP transport and BOSS connector. Preserve conservative pacing, caching, and risk controls.
 - `jobintel.web` exposes local HTTP APIs and the bundled static frontend.
 
-The model may draft qualitative analysis, but deterministic scores, recommendation thresholds, identities, timestamps, persistence, and provenance are controlled by application code. Do not permit the model to invent requirement IDs or evidence references.
+The model may draft qualitative analysis, but deterministic scores, recommendation thresholds, identities, timestamps, persistence, and provenance are controlled by application code. Scoring V2 includes only named professional skills and explicit education, language, experience, or technical-project thresholds; generic duties, soft skills, and product outcomes remain visible context with zero scoring weight. Do not permit the model to invent requirement IDs or evidence references.
 
 ## Local data and safety
 

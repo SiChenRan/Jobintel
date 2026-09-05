@@ -24,7 +24,7 @@ def test_initial_migration_creates_expected_schema_and_is_idempotent(
     empty_db: JobIntelDatabase,
 ) -> None:
     runner = MigrationRunner(empty_db)
-    assert runner.status().pending_versions == (1, 2, 3, 4, 5)
+    assert runner.status().pending_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9)
 
     first = runner.migrate()
     second = runner.migrate()
@@ -54,6 +54,13 @@ def test_initial_migration_creates_expected_schema_and_is_idempotent(
         "discovery_detail_attempts",
         "radar_checks",
         "radar_events",
+        "outreach_drafts",
+        "outreach_claims",
+        "outreach_claim_requirements",
+        "outreach_claim_evidence",
+        "outreach_events",
+        "email_notification_attempts",
+        "candidate_email_preferences",
     }
     assert empty_db.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -81,7 +88,7 @@ def test_database_newer_than_application_is_rejected(empty_db: JobIntelDatabase)
     empty_db.connection.execute(
         """
         INSERT INTO schema_migrations (version, name, checksum, applied_at)
-        VALUES (6, 'future', ?, '2026-09-04T00:00:00+00:00')
+        VALUES (10, 'future', ?, '2026-09-04T00:00:00+00:00')
         """,
         ("f" * 64,),
     )

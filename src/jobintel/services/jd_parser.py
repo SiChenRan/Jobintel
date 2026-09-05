@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from jobintel.models import (
     FrozenDomainModel,
@@ -28,15 +28,26 @@ from jobintel.providers.base import (
     Usage,
 )
 
-PARSER_PROMPT_VERSION = "jobintel-jd-parser-v2-zh-cn"
+PARSER_PROMPT_VERSION = "jobintel-jd-parser-v3-hard-requirements-zh-cn"
 PARSER_SUBMIT_TOOL = "submit_parsed_job"
 
 PARSER_SYSTEM_PROMPT = (
     "You extract a job description into a strict structured object. Preserve each explicit "
     "requirement as a concise standalone statement, in source order. Classify category and "
-    "importance from the text; do not invent requirements. Use a normalized skill only when "
-    "a concrete skill is present. Infer a short title and company name when present; otherwise "
-    "use '未命名职位' and '未知公司'. Requirement text must use concise Simplified Chinese; "
+    "importance from the text; do not invent requirements. Split concrete technical skills "
+    "such as Python, LangChain, RAG, databases, frameworks, tools, and protocols into distinct "
+    "skill requirements and set normalized_skill. Use normalized_skill only for a named, "
+    "verifiable professional skill, never for soft skills, generic responsibilities, business "
+    "outcomes, collaboration style, or product vision. Classify statements such as helping turn "
+    "a prototype into a user-facing product or translating user needs into product features as "
+    "other unless they also state a separate concrete technical threshold. Generic duties must "
+    "not be converted into skill requirements. A named technical skill listed under job "
+    "requirements is must unless "
+    "the source explicitly marks it preferred, optional, or bonus. "
+    "Preserve must, preferred, optional, and bonus wording in each requirement text so the "
+    "scoring policy can audit that modality. "
+    "Infer a short title and company name when present; otherwise use '未命名职位' and "
+    "'未知公司'. Requirement text must use concise Simplified Chinese; "
     "preserve technical names such as Python, Agent, RAG, APIs, and framework names. Finish "
     "by calling submit_parsed_job exactly once. Do not return prose or any other tool call."
 )
@@ -49,6 +60,13 @@ class ExtractedRequirement(FrozenDomainModel):
     category: RequirementCategory
     importance: RequirementImportance
     normalized_skill: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def concrete_skill_has_normalized_name(self) -> ExtractedRequirement:
+        """Force the parser to name every item it classifies as a hard skill."""
+        if self.category is RequirementCategory.SKILL and self.normalized_skill is None:
+            raise ValueError("skill requirement requires normalized_skill")
+        return self
 
 
 class ParsedJobSubmission(FrozenDomainModel):

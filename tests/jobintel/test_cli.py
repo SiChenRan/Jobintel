@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
+from email.message import EmailMessage
 from pathlib import Path
 
 import pytest
 from tests.conftest import FakeProvider
+from tests.jobintel.outreach_fixtures import build_outreach_scope, valid_outreach_message
 from typer.testing import CliRunner
 
 from jobintel import cli
-from jobintel.discovery.models import JobSource, RawJobListing
+from jobintel.discovery.models import CompanySize, JobSource, RawJobListing
 from jobintel.models import (
     GroundedClaim,
     InterviewTopic,
@@ -21,6 +24,8 @@ from jobintel.models import (
     ResumeSuggestion,
     stable_requirement_id,
 )
+from jobintel.notifications.models import CandidateEmailPreference
+from jobintel.outreach.service import OUTREACH_SUBMIT_TOOL
 from jobintel.persistence.db import JobIntelDatabase
 from jobintel.persistence.repository import SQLiteJobRepository
 from jobintel.persistence.seed import seed_database
@@ -51,10 +56,22 @@ class _DiscoveryConnector:
                 description="Python FastAPI PostgreSQL",
                 experience="3-5年",
                 education="本科",
+                company_size=CompanySize.SMALL,
                 url="https://www.zhipin.com/job_detail/boss-live-1.html",
                 published_text="今天",
             ),
         )[:limit]
+
+
+class _EmailSender:
+    from_address = "jobs@example.com"
+    recipient = "owner@example.net"
+
+    def __init__(self) -> None:
+        self.messages: list[EmailMessage] = []
+
+    def send(self, message: EmailMessage) -> None:
+        self.messages.append(message)
 
 
 def _seeded_repository(
@@ -579,6 +596,8 @@ def test_discover_returns_live_ranked_jobs_and_persists(
             "Python 后端",
             "--city",
             "上海",
+            "--company-size",
+            "small",
             "--limit",
             "10",
             "--detail-top",
@@ -591,6 +610,7 @@ def test_discover_returns_live_ranked_jobs_and_persists(
     payload = json.loads(result.stdout)
     assert payload["discovery"]["total_discovered"] == 1
     assert payload["discovery"]["hits"][0]["job"]["company_name"] == "真实科技"
+    assert payload["discovery"]["preference"]["company_sizes"] == ["small"]
     assert payload["discovery"]["source_attempts"][0]["status"] == "success"
     assert payload["discovery"]["detail_attempts"][0]["status"] == "skipped"
     assert payload["analyses"] == []
@@ -761,3 +781,99 @@ def test_source_doctor_reports_browser_readiness(monkeypatch: pytest.MonkeyPatch
         "ready": False,
         "source": "boss",
     }
+
+
+def test_outreach_cli_generates_reviews_and_lists_without_sending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "outreach.db"
+    database, repository = _seeded_repository(db_path)
+    job, _profile, analysis = build_outreach_scope(repository)
+    repository.save_analysis(analysis)
+    database.close()
+    provider = FakeProvider(
+        [
+            TurnResult(
+                tool_calls=[
+                    ToolCall(
+                        id="outreach",
+                        name=OUTREACH_SUBMIT_TOOL,
+                        arguments=valid_outreach_message(job).model_dump(),
+                    )
+                ]
+            )
+        ]
+    )
+    monkeypatch.setenv("JOBINTEL_DB_PATH", str(db_path))
+    monkeypatch.setattr(cli, "build_jobintel_provider", lambda _settings: provider)
+
+    generated = runner.invoke(
+        cli.app,
+        ["outreach", "generate", "--analysis-id", analysis.analysis_id, "--json"],
+    )
+    assert generated.exit_code == 0, generated.stdout
+    outreach_id = json.loads(generated.stdout)["outreach"]["outreach_id"]
+
+    approved = runner.invoke(cli.app, ["outreach", "approve", outreach_id, "--json"])
+    sent = runner.invoke(cli.app, ["outreach", "mark-sent", outreach_id, "--json"])
+    listed = runner.invoke(cli.app, ["outreach", "list", "--json"])
+    shown = runner.invoke(cli.app, ["outreach", "show", outreach_id, "--json"])
+
+    assert json.loads(approved.stdout)["status"] == "approved"
+    assert json.loads(sent.stdout)["status"] == "sent_confirmed"
+    assert json.loads(listed.stdout)[0]["outreach_id"] == outreach_id
+    assert [event["event_type"] for event in json.loads(shown.stdout)["events"]] == [
+        "approved",
+        "sent_confirmed",
+    ]
+
+
+def test_notify_cli_emails_saved_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "notify.db"
+    sender = _EmailSender()
+    monkeypatch.setenv("JOBINTEL_DB_PATH", str(db_path))
+    monkeypatch.setattr(
+        cli,
+        "build_connectors",
+        lambda **_kwargs: {JobSource.BOSS: _DiscoveryConnector()},
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_email_sender",
+        lambda _settings, *, recipient: sender if recipient == "owner@example.net" else None,
+    )
+    discovered = runner.invoke(
+        cli.app,
+        [
+            "discover",
+            "--candidate-id",
+            "C001",
+            "--query",
+            "Python",
+            "--limit",
+            "10",
+            "--json",
+        ],
+    )
+    run_id = json.loads(discovered.stdout)["discovery"]["run_id"]
+    database = JobIntelDatabase.connect(db_path)
+    repository = SQLiteJobRepository(database)
+    now = datetime.now(UTC)
+    repository.save_candidate_email_preference(
+        CandidateEmailPreference(
+            candidate_id="C001",
+            recipient_email="owner@example.net",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    database.close()
+
+    notified = runner.invoke(cli.app, ["notify", "discovery", run_id, "--limit", "10", "--json"])
+
+    assert notified.exit_code == 0, notified.stdout
+    assert json.loads(notified.stdout)["status"] == "sent"
+    assert len(sender.messages) == 1
+    plain = sender.messages[0].get_body(preferencelist=("plain",))
+    assert plain is not None
+    assert "Python 后端工程师" in plain.get_content()

@@ -18,6 +18,7 @@ from jobintel.discovery.connectors.base import (
     SourceUnavailableError,
 )
 from jobintel.discovery.models import (
+    CompanySize,
     DetailAttempt,
     DetailFetchResult,
     DetailFetchStatus,
@@ -74,7 +75,7 @@ class JobDiscoveryService:
         )
         resolved = preference.model_copy(update={"profile_version": profile.profile_version})
         per_source_limit = (
-            resolved.limit
+            min(200, max(30, resolved.limit))
             if len(resolved.sources) == 1
             else min(200, max(30, math.ceil(resolved.limit / len(resolved.sources)) * 2))
         )
@@ -394,6 +395,14 @@ class JobDiscoveryService:
                     salary_daily_min_yuan=daily_salary_min,
                     salary_daily_max_yuan=daily_salary_max,
                     employment_type=employment_type,
+                    company_size=next(
+                        (
+                            item.company_size
+                            for item in items
+                            if item.company_size is not CompanySize.UNKNOWN
+                        ),
+                        richest.company_size,
+                    ),
                     description=richest.description,
                     experience=richest.experience,
                     education=richest.education,
@@ -422,6 +431,8 @@ class JobDiscoveryService:
         if preference.city and job.location and preference.city not in job.location:
             return False
         if preference.employment_types and job.employment_type not in preference.employment_types:
+            return False
+        if preference.company_sizes and job.company_size not in preference.company_sizes:
             return False
         if preference.education_requirements and not any(
             value.casefold() in job.education.casefold()

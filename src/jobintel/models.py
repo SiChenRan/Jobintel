@@ -28,7 +28,7 @@ from pydantic import (
 )
 
 REQUIREMENT_ID_VERSION = "requirement-id-v1"
-ANALYSIS_SCHEMA_VERSION = "jobintel-analysis-v1"
+ANALYSIS_SCHEMA_VERSION = "jobintel-analysis-v2"
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -414,6 +414,8 @@ class ScoreBreakdown(FrozenDomainModel):
     """Complete deterministic score calculation and rounded result."""
 
     groups: tuple[ScoreGroupBreakdown, ...] = Field(min_length=1)
+    scored_requirement_ids: tuple[NonEmptyStr, ...] = ()
+    excluded_requirement_ids: tuple[NonEmptyStr, ...] = ()
     raw_score: DecimalValue = Field(ge=0, le=100)
     score: int = Field(ge=0, le=100)
 
@@ -426,6 +428,16 @@ class ScoreBreakdown(FrozenDomainModel):
         values = tuple(group.importance.value for group in groups)
         _require_unique(values, "score importance group")
         return groups
+
+    @model_validator(mode="after")
+    def validate_requirement_scope(self) -> Self:
+        """Keep scored and contextual requirement identities unique and disjoint."""
+        _require_unique(self.scored_requirement_ids, "scored requirement_id")
+        _require_unique(self.excluded_requirement_ids, "excluded requirement_id")
+        overlap = set(self.scored_requirement_ids) & set(self.excluded_requirement_ids)
+        if overlap:
+            raise ValueError("scored and excluded requirement IDs must be disjoint")
+        return self
 
 
 class JobAnalysis(JobAnalysisDraft):

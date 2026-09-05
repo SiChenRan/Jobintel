@@ -319,6 +319,154 @@ _RADAR_SCHEMA = (
     """,
 )
 
+_OUTREACH_SCHEMA = (
+    """
+    CREATE TABLE outreach_drafts (
+        outreach_id TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        analysis_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        job_version INTEGER NOT NULL,
+        candidate_id TEXT NOT NULL,
+        profile_version INTEGER NOT NULL,
+        channel TEXT NOT NULL,
+        tone TEXT NOT NULL,
+        salutation TEXT NOT NULL,
+        motivation TEXT NOT NULL,
+        conversation_opener TEXT NOT NULL,
+        closing TEXT NOT NULL,
+        rendered_message TEXT NOT NULL,
+        user_edited_message TEXT,
+        status TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        provenance_digest TEXT NOT NULL CHECK (length(provenance_digest) = 64),
+        payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (outreach_id, revision),
+        FOREIGN KEY (analysis_id, job_id, job_version, candidate_id, profile_version)
+            REFERENCES application_analyses(
+                analysis_id, job_id, job_version, candidate_id, profile_version
+            ) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE outreach_claims (
+        outreach_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        claim_id TEXT NOT NULL,
+        source_order INTEGER NOT NULL CHECK (source_order >= 0),
+        text TEXT NOT NULL,
+        PRIMARY KEY (outreach_id, revision, claim_id),
+        UNIQUE (outreach_id, revision, source_order),
+        FOREIGN KEY (outreach_id, revision)
+            REFERENCES outreach_drafts(outreach_id, revision) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE outreach_claim_requirements (
+        outreach_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        claim_id TEXT NOT NULL,
+        requirement_id TEXT NOT NULL,
+        reference_order INTEGER NOT NULL CHECK (reference_order >= 0),
+        job_id TEXT NOT NULL,
+        job_version INTEGER NOT NULL,
+        PRIMARY KEY (outreach_id, revision, claim_id, requirement_id),
+        UNIQUE (outreach_id, revision, claim_id, reference_order),
+        FOREIGN KEY (outreach_id, revision, claim_id)
+            REFERENCES outreach_claims(outreach_id, revision, claim_id) ON DELETE CASCADE,
+        FOREIGN KEY (job_id, job_version, requirement_id)
+            REFERENCES requirements(job_id, job_version, requirement_id)
+    )
+    """,
+    """
+    CREATE TABLE outreach_claim_evidence (
+        outreach_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        claim_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        citation_order INTEGER NOT NULL CHECK (citation_order >= 0),
+        candidate_id TEXT NOT NULL,
+        profile_version INTEGER NOT NULL,
+        PRIMARY KEY (outreach_id, revision, claim_id, evidence_id),
+        UNIQUE (outreach_id, revision, claim_id, citation_order),
+        FOREIGN KEY (outreach_id, revision, claim_id)
+            REFERENCES outreach_claims(outreach_id, revision, claim_id) ON DELETE CASCADE,
+        FOREIGN KEY (candidate_id, profile_version, evidence_id)
+            REFERENCES candidate_evidence(candidate_id, profile_version, evidence_id)
+    )
+    """,
+    """
+    CREATE TABLE outreach_events (
+        event_id TEXT PRIMARY KEY,
+        outreach_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        attributes_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (outreach_id, revision)
+            REFERENCES outreach_drafts(outreach_id, revision) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX idx_outreach_analysis
+        ON outreach_drafts(analysis_id, created_at)
+    """,
+    """
+    CREATE INDEX idx_outreach_candidate
+        ON outreach_drafts(candidate_id, profile_version, status, created_at)
+    """,
+    """
+    CREATE INDEX idx_outreach_events_revision
+        ON outreach_events(outreach_id, revision, created_at)
+    """,
+)
+
+_EMAIL_NOTIFICATION_SCHEMA = (
+    """
+    CREATE TABLE email_notification_attempts (
+        notification_id TEXT PRIMARY KEY,
+        discovery_run_id TEXT NOT NULL,
+        recipient_masked TEXT NOT NULL,
+        job_count INTEGER NOT NULL CHECK (job_count BETWEEN 1 AND 500),
+        status TEXT NOT NULL,
+        subject_sha256 TEXT NOT NULL CHECK (length(subject_sha256) = 64),
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY (discovery_run_id)
+            REFERENCES discovery_runs(run_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX idx_email_notifications_run
+        ON email_notification_attempts(discovery_run_id, created_at)
+    """,
+)
+
+_CANDIDATE_EMAIL_PREFERENCE_SCHEMA = (
+    """
+    CREATE TABLE candidate_email_preferences (
+        candidate_id TEXT PRIMARY KEY,
+        recipient_email TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+)
+
+_DISCOVERY_COMPANY_SIZE_SCHEMA = (
+    """
+    ALTER TABLE discovered_jobs
+        ADD COLUMN company_size TEXT NOT NULL DEFAULT 'unknown'
+    """,
+)
+
 
 @dataclass(frozen=True)
 class Migration:
@@ -357,6 +505,10 @@ MIGRATIONS = (
     Migration(3, "jobintel_boss_detail_enrichment", _DISCOVERY_DETAIL_SCHEMA),
     Migration(4, "jobintel_richer_discovery_filters", _DISCOVERY_FILTER_SCHEMA),
     Migration(5, "jobintel_incremental_radar", _RADAR_SCHEMA),
+    Migration(6, "jobintel_reviewed_hr_outreach", _OUTREACH_SCHEMA),
+    Migration(7, "jobintel_discovery_email_notifications", _EMAIL_NOTIFICATION_SCHEMA),
+    Migration(8, "jobintel_candidate_email_preferences", _CANDIDATE_EMAIL_PREFERENCE_SCHEMA),
+    Migration(9, "jobintel_discovery_company_size", _DISCOVERY_COMPANY_SIZE_SCHEMA),
 )
 
 

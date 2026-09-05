@@ -15,7 +15,18 @@ venv/
 
 # Environment / secrets
 .env
+.env.*
+!.env.example
 *.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+credentials*.json
+service-account*.json
+id_rsa
+id_ed25519
 
 # Test / coverage
 .pytest_cache/
@@ -27,10 +38,14 @@ htmlcov/
 .ruff_cache/
 
 # Local runtime data
+data/
 *.db
 *.sqlite
 *.sqlite3
-data/profile-previews/
+.jobintel/
+chrome-profile/
+browser-profile/
+uploads/
 
 # Tool-specific local settings
 .claude/settings.local.json

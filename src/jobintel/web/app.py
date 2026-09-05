@@ -8,6 +8,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -19,10 +20,21 @@ from pydantic import Field
 from jobintel.config import JobIntelProviderName, JobIntelSettings, load_jobintel_settings
 from jobintel.discovery.connectors.cdp import cdp_reachable
 from jobintel.discovery.connectors.registry import build_connectors
-from jobintel.discovery.models import EmploymentType, JobSearchPreference, JobSource
+from jobintel.discovery.models import CompanySize, EmploymentType, JobSearchPreference, JobSource
 from jobintel.discovery.service import JobDiscoveryService
-from jobintel.errors import JobIntelError
+from jobintel.errors import EntityNotFoundError, IdempotencyConflictError, JobIntelError
 from jobintel.models import FrozenDomainModel, JobAnalysis, NonEmptyStr
+from jobintel.notifications.address import mask_email_address
+from jobintel.notifications.factory import build_email_sender
+from jobintel.notifications.models import CandidateEmailPreference
+from jobintel.notifications.service import (
+    DiscoveryEmailNotificationService,
+    EmailNotificationError,
+)
+from jobintel.outreach.models import OutreachDraft, OutreachTone
+from jobintel.outreach.policy import BOSS_DRAFT_POLICY
+from jobintel.outreach.service import OutreachGenerationError, OutreachService
+from jobintel.outreach.state import OutreachStateTransitionError
 from jobintel.persistence.db import JobIntelDatabase
 from jobintel.persistence.migrations import MigrationRunner
 from jobintel.persistence.repository import SQLiteJobRepository
@@ -47,13 +59,14 @@ class DiscoveryRequest(FrozenDomainModel):
 
     candidate_id: NonEmptyStr
     profile_version: int | None = Field(default=None, ge=1)
-    query: NonEmptyStr = Field(max_length=100)
-    city: str = Field(default="", max_length=50)
+    query: NonEmptyStr = Field(default="Agent开发", max_length=100)
+    city: str = Field(default="北京", max_length=50)
     salary_min_k: int | None = Field(default=None, ge=0, le=1000)
     salary_max_k: int | None = Field(default=None, ge=0, le=1000)
     daily_salary_min_yuan: int | None = Field(default=None, ge=0, le=10000)
     daily_salary_max_yuan: int | None = Field(default=None, ge=0, le=10000)
-    employment_types: tuple[EmploymentType, ...] = ()
+    employment_types: tuple[EmploymentType, ...] = (EmploymentType.INTERNSHIP,)
+    company_sizes: tuple[CompanySize, ...] = ()
     education_requirements: tuple[NonEmptyStr, ...] = ()
     experience_requirements: tuple[NonEmptyStr, ...] = ()
     exclusions: tuple[NonEmptyStr, ...] = ()
@@ -61,7 +74,7 @@ class DiscoveryRequest(FrozenDomainModel):
     exclude_training: bool = False
     exclude_agency: bool = False
     strict_salary: bool = False
-    limit: int = Field(default=50, ge=1, le=500)
+    limit: int = Field(default=10, ge=1, le=500)
     detail_top: int = Field(default=3, ge=0, le=10)
 
 
@@ -85,6 +98,39 @@ class RadarRequest(FrozenDomainModel):
     baseline_run_id: NonEmptyStr
     detail_top: int = Field(default=0, ge=0, le=10)
     force: bool = False
+
+
+class GenerateOutreachRequest(FrozenDomainModel):
+    """Options for one evidence-grounded outreach generation run."""
+
+    tone: OutreachTone = OutreachTone.PROFESSIONAL
+    focus_requirement_ids: tuple[NonEmptyStr, ...] = Field(default=(), max_length=3)
+    provider: JobIntelProviderName | None = None
+
+
+class ReviseOutreachRequest(FrozenDomainModel):
+    """User-authored replacement text for an exact draft revision."""
+
+    revision: int = Field(ge=1)
+    message: NonEmptyStr = Field(max_length=BOSS_DRAFT_POLICY.max_message_chars)
+
+
+class OutreachActionRequest(FrozenDomainModel):
+    """One explicit user action against an exact draft revision."""
+
+    revision: int = Field(ge=1)
+
+
+class EmailDiscoveryRequest(FrozenDomainModel):
+    """Bounded options for emailing a saved discovery batch."""
+
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+class CandidateEmailPreferenceRequest(FrozenDomainModel):
+    """Candidate-scoped recipient submitted from the settings form."""
+
+    recipient_email: NonEmptyStr = Field(max_length=320)
 
 
 def _with_provider(
@@ -160,6 +206,60 @@ def _analysis_payload(repository: SQLiteJobRepository, analysis: JobAnalysis) ->
     return payload
 
 
+def _outreach_payload(
+    repository: SQLiteJobRepository,
+    draft: OutreachDraft,
+    *,
+    include_events: bool = True,
+) -> dict[str, object]:
+    """Enrich a draft with the exact human-readable requirements and evidence."""
+    job = repository.get_job(draft.job_id, draft.job_version)
+    profile = repository.get_candidate_profile(draft.candidate_id, draft.profile_version)
+    analysis = repository.get_analysis(draft.analysis_id)
+    requirements = {item.requirement_id: item for item in job.requirements}
+    evidence = {item.evidence_id: item for item in profile.evidence}
+    matches = {item.requirement_id: item for item in analysis.requirement_matches}
+    citations = []
+    for claim in draft.claims:
+        citations.append(
+            {
+                "claim_id": claim.claim_id,
+                "text": claim.text,
+                "requirements": [
+                    {
+                        **requirements[requirement_id].model_dump(mode="json"),
+                        "match_status": matches[requirement_id].status.value,
+                    }
+                    for requirement_id in claim.requirement_ids
+                ],
+                "evidence": [
+                    evidence[evidence_id].model_dump(mode="json")
+                    for evidence_id in claim.evidence_ids
+                ],
+            }
+        )
+    payload: dict[str, object] = {
+        "outreach": {
+            **draft.model_dump(mode="json"),
+            "effective_message": draft.effective_message,
+            "is_user_edited": draft.is_user_edited,
+            "character_count": len(draft.effective_message),
+        },
+        "job": {
+            "title": job.title,
+            "company_name": job.company_name,
+            "source_url": job.source_url,
+        },
+        "citations": citations,
+    }
+    if include_events:
+        payload["events"] = [
+            item.model_dump(mode="json")
+            for item in repository.list_outreach_events(draft.outreach_id)
+        ]
+    return payload
+
+
 def create_app(settings: JobIntelSettings | None = None) -> FastAPI:
     """Create the local-only JobIntel web application."""
     configured = settings or load_jobintel_settings()
@@ -184,6 +284,7 @@ def create_app(settings: JobIntelSettings | None = None) -> FastAPI:
             "boss_browser_ready": cdp_reachable(configured.discovery_cdp_port),
             "provider": configured.llm_provider.value,
             "radar_interval_hours": configured.radar_min_interval_hours,
+            "smtp_notification_ready": configured.smtp_notification_ready,
         }
 
     @application.get("/api/dashboard")
@@ -194,18 +295,27 @@ def create_app(settings: JobIntelSettings | None = None) -> FastAPI:
             discoveries = repository.list_discovery_runs(limit=8)
             analyses = repository.list_analyses(limit=8)
             radar_checks = repository.list_radar_checks(limit=8)
-            return {
-                "counts": repository.dashboard_counts(),
-                "profiles": [
+            profile_payloads = []
+            for profile in profiles:
+                preference = repository.find_candidate_email_preference(profile.candidate_id)
+                profile_payloads.append(
                     {
                         "candidate_id": profile.candidate_id,
                         "profile_version": profile.profile_version,
                         "summary": profile.summary,
                         "evidence_count": len(profile.evidence),
                         "created_at": profile.created_at,
+                        "email_notification_configured": preference is not None,
+                        "recipient_masked": (
+                            mask_email_address(preference.recipient_email)
+                            if preference is not None
+                            else None
+                        ),
                     }
-                    for profile in profiles
-                ],
+                )
+            return {
+                "counts": repository.dashboard_counts(),
+                "profiles": profile_payloads,
                 "discoveries": [
                     {
                         "run_id": run.run_id,
@@ -259,6 +369,51 @@ def create_app(settings: JobIntelSettings | None = None) -> FastAPI:
                 )
         except JobIntelError as exc:
             raise _error(404, "PROFILE_NOT_FOUND", exc) from exc
+
+    @application.get("/api/profiles/{candidate_id}/notification-email")
+    def candidate_notification_email(candidate_id: str) -> dict[str, object]:
+        """Return only the masked recipient setting for one candidate."""
+        try:
+            with _repository(configured) as repository:
+                repository.get_candidate_profile(candidate_id)
+                preference = repository.find_candidate_email_preference(candidate_id)
+            return {
+                "candidate_id": candidate_id,
+                "configured": preference is not None,
+                "recipient_masked": (
+                    mask_email_address(preference.recipient_email) if preference else None
+                ),
+            }
+        except EntityNotFoundError as exc:
+            raise _error(404, "PROFILE_NOT_FOUND", exc) from exc
+
+    @application.put("/api/profiles/{candidate_id}/notification-email")
+    def save_candidate_notification_email(
+        candidate_id: str, request: CandidateEmailPreferenceRequest
+    ) -> dict[str, object]:
+        """Create or replace one candidate's persisted notification recipient."""
+        try:
+            with _repository(configured) as repository:
+                existing = repository.find_candidate_email_preference(candidate_id)
+                now = datetime.now(UTC)
+                saved = repository.save_candidate_email_preference(
+                    CandidateEmailPreference(
+                        candidate_id=candidate_id,
+                        recipient_email=request.recipient_email,
+                        created_at=existing.created_at if existing else now,
+                        updated_at=now,
+                    )
+                )
+            return {
+                "candidate_id": saved.candidate_id,
+                "configured": True,
+                "recipient_masked": mask_email_address(saved.recipient_email),
+                "updated_at": saved.updated_at,
+            }
+        except EntityNotFoundError as exc:
+            raise _error(404, "PROFILE_NOT_FOUND", exc) from exc
+        except ValueError as exc:
+            raise _error(422, "INVALID_NOTIFICATION_EMAIL", exc) from exc
 
     @application.post("/api/profiles/preview")
     async def preview_profile(
@@ -338,6 +493,7 @@ def create_app(settings: JobIntelSettings | None = None) -> FastAPI:
                 daily_salary_max_yuan=request.daily_salary_max_yuan,
                 include_undisclosed_salary=not request.strict_salary,
                 employment_types=request.employment_types,
+                company_sizes=request.company_sizes,
                 education_requirements=request.education_requirements,
                 experience_requirements=request.experience_requirements,
                 exclusions=_exclusions(request),
@@ -384,6 +540,28 @@ def create_app(settings: JobIntelSettings | None = None) -> FastAPI:
         except JobIntelError as exc:
             raise _error(404, "DISCOVERY_NOT_FOUND", exc) from exc
 
+    @application.post("/api/discoveries/{run_id}/notifications/email")
+    def email_discovery(run_id: str, request: EmailDiscoveryRequest) -> object:
+        """Email a saved result batch to its candidate's persisted recipient."""
+        try:
+            with _repository(configured) as repository:
+                run = repository.get_discovery_run(run_id)
+                try:
+                    preference = repository.get_candidate_email_preference(
+                        run.preference.candidate_id
+                    )
+                except EntityNotFoundError as exc:
+                    raise _error(409, "EMAIL_RECIPIENT_NOT_CONFIGURED", exc) from exc
+                sender = build_email_sender(configured, recipient=preference.recipient_email)
+                receipt = DiscoveryEmailNotificationService(repository, sender).send_discovery(
+                    run_id, limit=request.limit
+                )
+            return receipt.model_dump(mode="json")
+        except EntityNotFoundError as exc:
+            raise _error(404, "DISCOVERY_NOT_FOUND", exc) from exc
+        except (EmailNotificationError, RuntimeError, ValueError) as exc:
+            raise _error(400, "EMAIL_NOTIFICATION_FAILED", exc) from exc
+
     @application.post("/api/discoveries/{run_id}/analyze")
     def analyze_discovery(run_id: str, request: AnalyzeDiscoveryRequest) -> object:
         """Analyze saved jobs without touching BOSS again."""
@@ -423,6 +601,144 @@ def create_app(settings: JobIntelSettings | None = None) -> FastAPI:
                 return _analysis_payload(repository, repository.get_analysis(analysis_id))
         except JobIntelError as exc:
             raise _error(404, "ANALYSIS_NOT_FOUND", exc) from exc
+
+    @application.post("/api/analyses/{analysis_id}/outreach-drafts")
+    async def generate_outreach(
+        analysis_id: str, request: GenerateOutreachRequest
+    ) -> dict[str, object]:
+        """Generate and persist one guarded outreach draft without contacting BOSS."""
+        request_settings = _with_provider(configured, request.provider)
+        try:
+            llm = build_jobintel_provider(request_settings)
+            with _repository(request_settings) as repository:
+                result = await OutreachService(
+                    llm,
+                    repository,
+                    max_repairs=request_settings.outreach_max_repairs,
+                ).generate(
+                    analysis_id=analysis_id,
+                    tone=request.tone,
+                    focus_requirement_ids=request.focus_requirement_ids,
+                )
+                payload = _outreach_payload(repository, result.outreach)
+                payload["telemetry"] = result.telemetry.model_dump(mode="json")
+                return payload
+        except EntityNotFoundError as exc:
+            raise _error(404, "ANALYSIS_NOT_FOUND", exc) from exc
+        except OutreachGenerationError as exc:
+            detail = ValueError(
+                str(exc)
+                + (
+                    ": " + ", ".join(item.code.value for item in exc.violations)
+                    if exc.violations
+                    else ""
+                )
+            )
+            raise _error(400, "OUTREACH_GENERATION_FAILED", detail) from exc
+        except (JobIntelError, RuntimeError, ValueError) as exc:
+            raise _error(400, "OUTREACH_GENERATION_FAILED", exc) from exc
+
+    @application.get("/api/outreach-drafts")
+    def outreach_drafts(
+        analysis_id: str | None = None,
+        candidate_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> list[dict[str, object]]:
+        """List latest outreach revisions with display-safe citation context."""
+        with _repository(configured) as repository:
+            drafts = (
+                repository.list_outreach_for_analysis(analysis_id)
+                if analysis_id is not None
+                else repository.list_outreach(candidate_id=candidate_id, limit=limit)
+            )
+            return [
+                _outreach_payload(repository, item, include_events=False) for item in drafts[:limit]
+            ]
+
+    @application.get("/api/outreach-drafts/{outreach_id}")
+    def outreach_draft(
+        outreach_id: str, revision: int | None = Query(default=None, ge=1)
+    ) -> dict[str, object]:
+        """Return one complete outreach revision and its audit history."""
+        try:
+            with _repository(configured) as repository:
+                return _outreach_payload(repository, repository.get_outreach(outreach_id, revision))
+        except EntityNotFoundError as exc:
+            raise _error(404, "OUTREACH_NOT_FOUND", exc) from exc
+
+    @application.post("/api/outreach-drafts/{outreach_id}/revisions")
+    def revise_outreach(outreach_id: str, request: ReviseOutreachRequest) -> dict[str, object]:
+        """Create a new draft revision from explicitly user-edited text."""
+        try:
+            with _repository(configured) as repository:
+                draft = OutreachService(None, repository).revise(
+                    outreach_id,
+                    request.message,
+                    revision=request.revision,
+                )
+                return _outreach_payload(repository, draft)
+        except EntityNotFoundError as exc:
+            raise _error(404, "OUTREACH_NOT_FOUND", exc) from exc
+        except IdempotencyConflictError as exc:
+            raise _error(409, "OUTREACH_REVISION_CONFLICT", exc) from exc
+        except (JobIntelError, ValueError) as exc:
+            raise _error(400, "OUTREACH_REVISION_FAILED", exc) from exc
+
+    def apply_outreach_action(
+        outreach_id: str,
+        request: OutreachActionRequest,
+        action: str,
+    ) -> dict[str, object]:
+        """Apply one local review action with shared conflict semantics."""
+        try:
+            with _repository(configured) as repository:
+                service = OutreachService(None, repository)
+                operation = {
+                    "approve": service.approve,
+                    "copied": service.record_copied,
+                    "opened": service.record_opened,
+                    "sent-confirmed": service.confirm_sent,
+                    "dismiss": service.dismiss,
+                }[action]
+                draft = operation(outreach_id, revision=request.revision)
+                return _outreach_payload(repository, draft)
+        except EntityNotFoundError as exc:
+            raise _error(404, "OUTREACH_NOT_FOUND", exc) from exc
+        except (IdempotencyConflictError, OutreachStateTransitionError) as exc:
+            raise _error(409, "OUTREACH_STATE_CONFLICT", exc) from exc
+        except (JobIntelError, ValueError) as exc:
+            raise _error(400, "OUTREACH_ACTION_FAILED", exc) from exc
+
+    @application.post("/api/outreach-drafts/{outreach_id}/approve")
+    def approve_outreach(outreach_id: str, request: OutreachActionRequest) -> dict[str, object]:
+        """Approve an exact draft revision without sending it."""
+        return apply_outreach_action(outreach_id, request, "approve")
+
+    @application.post("/api/outreach-drafts/{outreach_id}/events/copied")
+    def record_outreach_copied(
+        outreach_id: str, request: OutreachActionRequest
+    ) -> dict[str, object]:
+        """Record that the user copied an approved draft."""
+        return apply_outreach_action(outreach_id, request, "copied")
+
+    @application.post("/api/outreach-drafts/{outreach_id}/events/opened")
+    def record_outreach_opened(
+        outreach_id: str, request: OutreachActionRequest
+    ) -> dict[str, object]:
+        """Record that the user opened the stored source URL."""
+        return apply_outreach_action(outreach_id, request, "opened")
+
+    @application.post("/api/outreach-drafts/{outreach_id}/events/sent-confirmed")
+    def confirm_outreach_sent(
+        outreach_id: str, request: OutreachActionRequest
+    ) -> dict[str, object]:
+        """Record the user's confirmation of a manual platform send."""
+        return apply_outreach_action(outreach_id, request, "sent-confirmed")
+
+    @application.post("/api/outreach-drafts/{outreach_id}/dismiss")
+    def dismiss_outreach(outreach_id: str, request: OutreachActionRequest) -> dict[str, object]:
+        """Dismiss an exact draft revision."""
+        return apply_outreach_action(outreach_id, request, "dismiss")
 
     @application.post("/api/radar/checks")
     def check_radar(request: RadarRequest) -> object:

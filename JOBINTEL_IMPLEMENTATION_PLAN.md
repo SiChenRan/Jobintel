@@ -23,6 +23,10 @@ JobIntel 面向中文求职者，将真实职位发现、个人经历证据、�
 | M6.6 求职档案与雷达 | 完成 | PDF/文本简历导入、确认、发现批次、增量雷达、重新分析 |
 | M6.7 Web 工作台 | 完成 | 本地 FastAPI + 静态前端，覆盖核心候选人工作流 |
 | M8 仓库清理与打包 | 完成 | 独立 JobIntel 包、三家 LLM Provider、公开仓库文档和构建配置 |
+| M9.1 沟通草稿内核 | 完成 | Outreach Domain、稳定 ID、状态机、中文 Prompt、Channel Policy、Evidence Guardrail |
+| M9.2 沟通草稿服务 | 完成 | migration 6、Repository、Provider repair、Finalizer、版本与事件审计、CLI 命令组 |
+| M9.3 沟通草稿 Web 工作流 | 完成 | Analysis 详情入口、编辑与证据展开、审批、复制、打开岗位、人工发送确认、revision 冲突恢复 |
+| 邮件通知 | 完成 | 候选人独立收件邮箱、SMTP TLS、搜索批次职位摘要与链接、CLI/Web 入口、最小审计记录 |
 
 ## 3. 当前架构
 
@@ -43,7 +47,8 @@ Application Services ───────── Discovery Service
                ├── Jobs / Requirements
                ├── Discovery Runs
                ├── Analyses / Matches
-               └── Radar State
+               ├── Radar State
+               └── Outreach Drafts / Events
 ```
 
 关键约束：
@@ -82,21 +87,28 @@ make package
 - 补充 UI 内的新手引导、任务进度和失败恢复入口；
 - 建立 10 个匿名化回归案例，覆盖简历、JD、评分和中文输出。
 
-### P1：HR 沟通草稿（人工确认）
+### P1 / M9：HR 沟通草稿（M9.3 已完成）
 
-- 根据候选人证据和岗位要求生成短版打招呼、自我介绍与追问建议；
-- 每条能力陈述必须引用 Candidate Evidence，禁止编造经历；
-- 在 Web 页面展示可编辑草稿、证据来源和敏感内容警告；
-- V1 只提供复制与人工发送，不自动点击或批量触达 HR。
+详细设计见 [`docs/HR_OUTREACH_DESIGN.md`](docs/HR_OUTREACH_DESIGN.md)。
 
-### P2：受控发送实验
+- 根据 Candidate Evidence、Job Requirement 和已保存 Analysis 生成中文打招呼、自我介绍与交流问题；
+- 每条事实陈述必须引用当前 Profile Version 的 Evidence，禁止编造经历；
+- 增加版本化草稿、状态机、用户编辑和本地审计事件；
+- 在 Web 页面展示可编辑草稿、证据来源、字数和真实性警告；
+- 提供批准、复制、打开原岗位和手动标记已发送；
+- 不通过 CDP 填写或发送聊天内容，不提供批量触达。
 
-仅在 P1 通过真实用户验收后考虑：
+下一批为 M9.4：匿名化案例评测、三家 Provider 结构兼容、隐私与日志审计和发布验收。
 
-- 发送前逐岗位显式确认，默认关闭；
-- 严格日限额、随机冷却、重复联系人去重和完整审计记录；
-- 遇到验证、风控或页面不确定状态立即停止；
-- 不实现验证码绕过、指纹伪装或无人值守批量沟通。
+### P2 / M10：官方受控发送（条件性）
+
+仅在目标平台提供公开发送 API、正式合作接口或明确书面授权后考虑：
+
+- 发送适配器与草稿生成服务分离，默认关闭；
+- 每个岗位发送前都需要用户显式批准当前 revision；
+- 严格日限额、幂等键、随机冷却、重复联系人去重和完整审计；
+- 遇到认证、验证、风控或不确定响应立即停止；
+- 不使用 CDP 点击发送，不实现验证码绕过、指纹伪装或无人值守批量沟通。
 
 ### P3：多平台扩展
 

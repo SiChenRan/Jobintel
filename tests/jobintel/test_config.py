@@ -21,6 +21,9 @@ def test_jobintel_defaults() -> None:
     assert settings.agent_max_repairs == 2
     assert settings.agent_max_tool_calls == 60
     assert settings.parser_max_repairs == 2
+    assert settings.outreach_max_repairs == 2
+    assert settings.smtp_notification_ready is False
+    assert settings.smtp_port == 587
     assert settings.llm_provider is JobIntelProviderName.ANTHROPIC
     assert settings.deepseek_model == "deepseek-v4-pro"
     assert settings.deepseek_base_url == "https://api.deepseek.com"
@@ -43,6 +46,7 @@ def test_jobintel_database_path_reads_environment(monkeypatch: pytest.MonkeyPatc
         ("agent_max_repairs", -1),
         ("agent_max_tool_calls", 0),
         ("parser_max_repairs", -1),
+        ("outreach_max_repairs", -1),
     ],
 )
 def test_jobintel_budgets_reject_invalid_values(field: str, value: int) -> None:
@@ -59,3 +63,14 @@ def test_discovery_pacing_rejects_unsafe_or_inverted_ranges() -> None:
             discovery_search_min_delay_seconds=3,
             discovery_search_max_delay_seconds=2,
         )
+
+
+def test_email_notification_readiness_and_auth_pair() -> None:
+    settings = JobIntelSettings(
+        _env_file=None,
+        smtp_host="smtp.example.com",
+        smtp_from_address="jobs@example.com",
+    )
+    assert settings.smtp_notification_ready is True
+    with pytest.raises(ValidationError, match="username and password"):
+        JobIntelSettings(_env_file=None, smtp_username="account")

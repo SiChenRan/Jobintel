@@ -20,6 +20,7 @@ from jobintel.discovery.connectors.cdp import DEFAULT_CDP_PORT, CDPSession
 from jobintel.discovery.models import (
     DetailFetchResult,
     DetailFetchStatus,
+    EmploymentType,
     JobSearchPreference,
     JobSource,
     JobSourceLink,
@@ -27,12 +28,14 @@ from jobintel.discovery.models import (
     RawJobListing,
     content_digest,
     infer_employment_type,
+    parse_company_size,
     utc_now,
 )
 
 BOSS_ORIGIN = "https://www.zhipin.com"
 BOSS_SEARCH_PAGE = f"{BOSS_ORIGIN}/web/geek/job"
 BOSS_API_PATH = "/wapi/zpgeek/search/joblist.json"
+_BOSS_PAGE_SIZE = 30
 BOSS_CITY_CODES = {
     "北京": "101010100",
     "上海": "101020100",
@@ -86,6 +89,7 @@ _FETCH_EXPRESSION = r"""(async () => {
     experience: job.jobExperience || "",
     education: job.jobDegree || "",
     employment_type: job.jobTypeName || "",
+    company_size: job.brandScaleName || "",
     url: job.encryptJobId
       ? `https://www.zhipin.com/job_detail/${job.encryptJobId}.html` : "",
     published_text: job.activeTimeDesc || ""
@@ -185,13 +189,15 @@ class BossConnector:
             cdp.send("Page.navigate", {"url": BOSS_SEARCH_PAGE}, session_id)
             self._wait_ready(cdp, session_id)
             listings: list[RawJobListing] = []
-            for page in range(1, min(10, math.ceil(limit / 30)) + 1):
-                page_size = min(30, limit - len(listings))
+            source_query = self._source_query(preference)
+            for page in range(1, min(10, math.ceil(limit / _BOSS_PAGE_SIZE)) + 1):
                 params: dict[str, str | int] = {
                     "scene": 1,
-                    "query": preference.query,
+                    "query": source_query,
                     "page": page,
-                    "pageSize": page_size,
+                    # BOSS derives page offsets from pageSize. Changing it on the
+                    # last page makes that page overlap the previous one.
+                    "pageSize": _BOSS_PAGE_SIZE,
                 }
                 if preference.city:
                     params["city"] = BOSS_CITY_CODES.get(preference.city, preference.city)
@@ -201,7 +207,7 @@ class BossConnector:
                 )
                 page_items = self._parse(raw)
                 listings.extend(self._to_listing(item) for item in page_items)
-                if len(page_items) < page_size or len(listings) >= limit:
+                if len(page_items) < _BOSS_PAGE_SIZE or len(listings) >= limit:
                     break
                 self._sleep(self._jitter(*self._search_delay))
             return tuple(listings[:limit])
@@ -210,6 +216,20 @@ class BossConnector:
                 with suppress(Exception):
                     cdp.send("Target.closeTarget", {"targetId": target_id})
             cdp.close()
+
+    @staticmethod
+    def _source_query(preference: JobSearchPreference) -> str:
+        """Add an explicit source keyword for employment types BOSS may ignore."""
+        query = preference.query.strip()
+        normalized = query.casefold()
+        suffix = ""
+        if EmploymentType.INTERNSHIP in preference.employment_types and not any(
+            marker in normalized for marker in ("实习", "intern")
+        ):
+            suffix = "实习"
+        elif EmploymentType.PART_TIME in preference.employment_types and "兼职" not in query:
+            suffix = "兼职"
+        return f"{query} {suffix}".strip()
 
     def fetch_details(self, links: tuple[JobSourceLink, ...]) -> tuple[DetailFetchResult, ...]:
         """Fetch at most ten details serially, with jitter and a risk-control circuit breaker."""
@@ -375,9 +395,11 @@ class BossConnector:
     def _to_listing(item: dict[str, Any]) -> RawJobListing:
         values = dict(item)
         source_employment_type = str(values.pop("employment_type", ""))
+        source_company_size = str(values.pop("company_size", ""))
         values["employment_type"] = infer_employment_type(
             source_employment_type,
             str(values.get("title", "")),
             str(values.get("description", "")),
         )
+        values["company_size"] = parse_company_size(source_company_size)
         return RawJobListing(source=JobSource.BOSS, **values)

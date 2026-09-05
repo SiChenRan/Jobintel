@@ -9,6 +9,7 @@ from jobintel.discovery.connectors.base import (
     AuthenticationRequiredError,
 )
 from jobintel.discovery.models import (
+    CompanySize,
     DetailFetchResult,
     DetailFetchStatus,
     DiscoveryRun,
@@ -21,6 +22,7 @@ from jobintel.discovery.models import (
     RawJobListing,
     SourceStatus,
     canonical_job_key,
+    parse_company_size,
     parse_daily_salary_yuan,
     parse_salary_k,
 )
@@ -39,6 +41,7 @@ def _listing(
     location: str = "上海 · 浦东",
     salary: str = "25-40K",
     description: str = "Python FastAPI PostgreSQL Kubernetes",
+    company_size: CompanySize = CompanySize.UNKNOWN,
 ) -> RawJobListing:
     return RawJobListing(
         source=source,
@@ -50,6 +53,7 @@ def _listing(
         description=description,
         experience="3-5年",
         education="本科",
+        company_size=company_size,
         url=f"https://example.com/{source.value}/{external_id}",
         published_text="今天",
     )
@@ -124,6 +128,54 @@ def test_salary_parser_supports_common_monthly_and_annual_labels() -> None:
     assert parse_daily_salary_yuan("200-350元/天") == (200, 350)
     assert parse_daily_salary_yuan("300元/日") == (300, 300)
     assert parse_daily_salary_yuan("25-40K") == (None, None)
+
+
+def test_company_size_parser_supports_boss_headcount_labels() -> None:
+    assert parse_company_size("20-99人") is CompanySize.SMALL
+    assert parse_company_size("10000人以上") is CompanySize.ENTERPRISE
+    assert parse_company_size("") is CompanySize.UNKNOWN
+
+
+def test_company_size_filter_excludes_other_and_undisclosed_sizes(
+    jobintel_repo: SQLiteJobRepository,
+) -> None:
+    service = JobDiscoveryService(
+        jobintel_repo,
+        {
+            JobSource.BOSS: FakeConnector(
+                JobSource.BOSS,
+                (
+                    _listing(
+                        JobSource.BOSS,
+                        "small",
+                        company="小型团队",
+                        company_size=CompanySize.SMALL,
+                    ),
+                    _listing(
+                        JobSource.BOSS,
+                        "enterprise",
+                        company="大型公司",
+                        company_size=CompanySize.ENTERPRISE,
+                    ),
+                    _listing(JobSource.BOSS, "unknown", company="规模未披露公司"),
+                ),
+            )
+        },
+    )
+
+    run = service.discover(
+        JobSearchPreference(
+            candidate_id="C001",
+            query="Python",
+            company_sizes=(CompanySize.SMALL,),
+            sources=(JobSource.BOSS,),
+        ),
+        persist=False,
+    )
+
+    assert [hit.job.company_name for hit in run.hits] == ["小型团队"]
+    assert run.hits[0].job.company_size is CompanySize.SMALL
+    assert run.filtered_out == 2
 
 
 def test_daily_salary_and_internship_filters_use_correct_units(
@@ -229,6 +281,7 @@ def test_discovery_deduplicates_filters_ranks_and_persists(
         JobSource.BOSS,
         "l1",
         description="Python FastAPI PostgreSQL Kubernetes MLOps production platform",
+        company_size=CompanySize.SMALL,
     )
     low_salary = _listing(
         JobSource.BOSS,
@@ -277,9 +330,12 @@ def test_discovery_deduplicates_filters_ranks_and_persists(
     assert len(run.hits) == 1
     assert len(run.hits[0].job.source_links) == 2
     assert run.hits[0].job.description == duplicate.description
+    assert run.hits[0].job.company_size is CompanySize.SMALL
     assert "python" in run.hits[0].matched_terms
     assert run.hits[0].rank_score > 50
-    assert jobintel_repo.get_discovery_run(run.run_id) == run
+    restored = jobintel_repo.get_discovery_run(run.run_id)
+    assert restored == run
+    assert restored.hits[0].job.company_size is CompanySize.SMALL
 
 
 def test_discovery_reports_source_failure_and_dry_run_does_not_persist(

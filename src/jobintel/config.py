@@ -5,8 +5,10 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from jobintel.notifications.models import SMTPTransport
 
 
 class JobIntelProviderName(StrEnum):
@@ -40,6 +42,14 @@ class JobIntelSettings(BaseSettings):
     agent_max_repairs: int = Field(default=2, ge=0)
     agent_max_tool_calls: int = Field(default=60, ge=1)
     parser_max_repairs: int = Field(default=2, ge=0)
+    outreach_max_repairs: int = Field(default=2, ge=0)
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_transport: SMTPTransport = SMTPTransport.STARTTLS
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from_address: str | None = None
+    smtp_timeout_seconds: float = Field(default=15, gt=0, le=120)
     discovery_cdp_port: int = Field(default=9222, ge=1, le=65535)
     discovery_timeout_seconds: float = Field(default=12.0, gt=0, le=120)
     discovery_max_workers: int = Field(default=4, ge=1, le=8)
@@ -57,7 +67,20 @@ class JobIntelSettings(BaseSettings):
             raise ValueError("discovery search minimum delay cannot exceed maximum")
         if self.discovery_detail_min_delay_seconds > self.discovery_detail_max_delay_seconds:
             raise ValueError("discovery detail minimum delay cannot exceed maximum")
+        if (self.smtp_username is None) != (self.smtp_password is None):
+            raise ValueError("SMTP username and password must be configured together")
         return self
+
+    @property
+    def smtp_notification_ready(self) -> bool:
+        """Return whether the shared SMTP sender settings are complete."""
+        return all(
+            value and value.strip()
+            for value in (
+                self.smtp_host,
+                self.smtp_from_address,
+            )
+        )
 
     def require_anthropic_key(self) -> str:
         """Return the Anthropic key or raise a safe configuration error."""

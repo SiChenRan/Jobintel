@@ -21,6 +21,7 @@ from jobintel.config import (
 from jobintel.discovery.connectors.cdp import cdp_reachable, setup_chrome
 from jobintel.discovery.connectors.registry import build_connectors
 from jobintel.discovery.models import (
+    CompanySize,
     DiscoveryRun,
     EmploymentType,
     JobSearchPreference,
@@ -31,6 +32,13 @@ from jobintel.discovery.models import (
 from jobintel.discovery.service import JobDiscoveryService
 from jobintel.errors import JobIntelError
 from jobintel.models import CandidateProfile, JobAnalysis, JobPosting, MatchStatus, Recommendation
+from jobintel.notifications.factory import build_email_sender
+from jobintel.notifications.service import (
+    DiscoveryEmailNotificationService,
+    EmailNotificationError,
+)
+from jobintel.outreach.models import OutreachDraft, OutreachEventType, OutreachTone
+from jobintel.outreach.service import OutreachGenerationError, OutreachService
 from jobintel.persistence.db import JobIntelDatabase
 from jobintel.persistence.migrations import MigrationRunner
 from jobintel.persistence.repository import SQLiteJobRepository
@@ -64,6 +72,16 @@ radar_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(radar_app, name="radar")
+outreach_app = typer.Typer(
+    help="生成、审核并记录基于证据的 HR 沟通草稿 (不会自动发送)。",
+    no_args_is_help=True,
+)
+app.add_typer(outreach_app, name="outreach")
+notify_app = typer.Typer(
+    help="将已保存的职位搜索结果发送到配置的通知邮箱。",
+    no_args_is_help=True,
+)
+app.add_typer(notify_app, name="notify")
 
 _EXCLUSION_PRESETS = {
     "outsourcing": ("外包", "驻场"),
@@ -150,6 +168,34 @@ def _render_profile(console: Console, profile: CandidateProfile, *, title: str) 
             "、".join(item.skills) or "—",
         )
     console.print(table)
+
+
+def _render_outreach(console: Console, draft: OutreachDraft) -> None:
+    """Render one reviewed outreach revision and its evidence references."""
+    edited = " · 用户已修改" if draft.is_user_edited else ""
+    console.print(
+        Panel(
+            draft.effective_message,
+            title=(
+                f"HR 沟通草稿 · {draft.outreach_id}@{draft.revision} · {draft.status.value}{edited}"
+            ),
+            border_style="cyan",
+        )
+    )
+    citations = Table(title="事实声明与证据引用", expand=True)
+    citations.add_column("声明")
+    citations.add_column("岗位要求 ID")
+    citations.add_column("简历证据 ID")
+    for claim in draft.claims:
+        citations.add_row(
+            claim.text,
+            "、".join(claim.requirement_ids),
+            "、".join(claim.evidence_ids),
+        )
+    console.print(citations)
+    console.print(
+        "[yellow]安全提示: 这里只生成草稿。请人工核对、复制并在 BOSS 直聘中手动发送。[/yellow]"
+    )
 
 
 @profile_app.command("import")
@@ -616,6 +662,340 @@ def list_analyses(
         database.close()
 
 
+@outreach_app.command("generate")
+def generate_outreach(
+    analysis_id: str = typer.Option(..., "--analysis-id", help="已保存的深入分析 ID。"),
+    tone: OutreachTone = typer.Option(OutreachTone.PROFESSIONAL, "--tone"),
+    focus_requirement_ids: list[str] = typer.Option(
+        [], "--focus-requirement-id", help="可重复指定优先写入的岗位要求 ID。"
+    ),
+    provider: JobIntelProviderName | None = typer.Option(None, "--provider", "-p"),
+    run_id: str | None = typer.Option(None, "--run-id", hidden=True),
+    json_output: bool = typer.Option(False, "--json", help="输出机器可读 JSON。"),
+) -> None:
+    """从已验证分析和简历证据生成中文 HR 沟通草稿."""
+    settings = load_jobintel_settings()
+    if provider is not None:
+        settings.llm_provider = provider
+    console = _console()
+    try:
+        llm = build_jobintel_provider(settings)
+    except (ImportError, RuntimeError, ValueError) as exc:
+        _abort(console, str(exc), code="OUTREACH_PROVIDER_UNAVAILABLE", json_output=json_output)
+    database = JobIntelDatabase.connect(settings.jobintel_db_path)
+    try:
+        _ensure_seeded(database)
+        repository = SQLiteJobRepository(database)
+        service = OutreachService(
+            llm,
+            repository,
+            max_repairs=settings.outreach_max_repairs,
+        )
+        try:
+            if json_output:
+                result = asyncio.run(
+                    service.generate(
+                        analysis_id=analysis_id,
+                        tone=tone,
+                        focus_requirement_ids=tuple(focus_requirement_ids),
+                        run_id=run_id,
+                    )
+                )
+            else:
+                with console.status("[bold]正在生成并校验 HR 沟通草稿…[/bold]"):
+                    result = asyncio.run(
+                        service.generate(
+                            analysis_id=analysis_id,
+                            tone=tone,
+                            focus_requirement_ids=tuple(focus_requirement_ids),
+                            run_id=run_id,
+                        )
+                    )
+        except OutreachGenerationError as exc:
+            details = ", ".join(item.code.value for item in exc.violations)
+            message = str(exc) + (f"; 最终校验问题: {details}" if details else "")
+            _abort(console, message, code="OUTREACH_GENERATION_FAILED", json_output=json_output)
+        except (JobIntelError, RuntimeError, ValueError) as exc:
+            _abort(console, str(exc), code="OUTREACH_GENERATION_FAILED", json_output=json_output)
+        if json_output:
+            _emit_json(result.model_dump(mode="json"))
+        else:
+            _render_outreach(console, result.outreach)
+            console.print(
+                f"审核通过后运行: [bold]jobintel outreach approve "
+                f"{result.outreach.outreach_id}[/bold]"
+            )
+    finally:
+        database.close()
+
+
+@outreach_app.command("show")
+def show_outreach(
+    outreach_id: str = typer.Argument(..., help="沟通草稿 ID。"),
+    revision: int | None = typer.Option(None, "--revision", min=1),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """查看最新或指定版本的沟通草稿及审计事件."""
+    settings = load_jobintel_settings()
+    console = _console()
+    database = JobIntelDatabase.connect(settings.jobintel_db_path)
+    try:
+        MigrationRunner(database).migrate()
+        repository = SQLiteJobRepository(database)
+        try:
+            draft = repository.get_outreach(outreach_id, revision)
+            events = repository.list_outreach_events(outreach_id)
+        except JobIntelError as exc:
+            _abort(console, str(exc), code="OUTREACH_NOT_FOUND", json_output=json_output)
+        if json_output:
+            _emit_json(
+                {
+                    "outreach": draft.model_dump(mode="json"),
+                    "events": [item.model_dump(mode="json") for item in events],
+                }
+            )
+        else:
+            _render_outreach(console, draft)
+            if events:
+                console.print(
+                    "操作记录: "
+                    + " → ".join(f"{item.event_type.value}@v{item.revision}" for item in events)
+                )
+    finally:
+        database.close()
+
+
+@outreach_app.command("list")
+def list_outreach_drafts(
+    candidate_id: str | None = typer.Option(None, "--candidate-id", "-c"),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """列出每份沟通草稿的最新版本."""
+    settings = load_jobintel_settings()
+    console = _console()
+    database = JobIntelDatabase.connect(settings.jobintel_db_path)
+    try:
+        MigrationRunner(database).migrate()
+        repository = SQLiteJobRepository(database)
+        drafts = repository.list_outreach(candidate_id=candidate_id, limit=limit)
+        if json_output:
+            _emit_json([item.model_dump(mode="json") for item in drafts])
+        else:
+            table = Table(title=f"HR 沟通草稿 ({len(drafts)} 条)", expand=True)
+            table.add_column("草稿 ID")
+            table.add_column("版本")
+            table.add_column("候选人")
+            table.add_column("岗位")
+            table.add_column("状态")
+            table.add_column("更新时间")
+            for item in drafts:
+                table.add_row(
+                    item.outreach_id,
+                    str(item.revision),
+                    f"{item.candidate_id}@{item.profile_version}",
+                    f"{item.job_id}@{item.job_version}",
+                    item.status.value,
+                    item.updated_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+                )
+            console.print(table)
+    finally:
+        database.close()
+
+
+@outreach_app.command("revise")
+def revise_outreach(
+    outreach_id: str = typer.Argument(...),
+    message: str | None = typer.Option(None, "--message"),
+    message_file: Path | None = typer.Option(
+        None,
+        "--message-file",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """将人工修改后的完整文案保存为一个新的待审核版本."""
+    console = _console()
+    if (message is None) == (message_file is None):
+        _abort(
+            console,
+            "请且仅请提供 --message 或 --message-file。",
+            code="INVALID_OUTREACH_REVISION",
+            json_output=json_output,
+        )
+    try:
+        if message is not None:
+            edited = message
+        else:
+            assert message_file is not None
+            edited = message_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        _abort(console, str(exc), code="OUTREACH_FILE_READ_FAILED", json_output=json_output)
+    _perform_outreach_action(
+        outreach_id,
+        action="revise",
+        revision=None,
+        message=edited,
+        json_output=json_output,
+    )
+
+
+def _perform_outreach_action(
+    outreach_id: str,
+    *,
+    action: str,
+    revision: int | None,
+    json_output: bool,
+    message: str | None = None,
+) -> None:
+    """Run one local review action with consistent persistence and output."""
+    settings = load_jobintel_settings()
+    console = _console()
+    database = JobIntelDatabase.connect(settings.jobintel_db_path)
+    try:
+        MigrationRunner(database).migrate()
+        repository = SQLiteJobRepository(database)
+        service = OutreachService(None, repository)
+        try:
+            if action == "revise":
+                assert message is not None
+                draft = service.revise(outreach_id, message)
+            else:
+                operations = {
+                    OutreachEventType.APPROVED.value: service.approve,
+                    OutreachEventType.COPIED.value: service.record_copied,
+                    OutreachEventType.OPENED.value: service.record_opened,
+                    OutreachEventType.SENT_CONFIRMED.value: service.confirm_sent,
+                    OutreachEventType.DISMISSED.value: service.dismiss,
+                }
+                draft = operations[action](outreach_id, revision=revision)
+        except (JobIntelError, RuntimeError, ValueError) as exc:
+            _abort(console, str(exc), code="OUTREACH_ACTION_FAILED", json_output=json_output)
+        if json_output:
+            _emit_json(draft.model_dump(mode="json"))
+        else:
+            _render_outreach(console, draft)
+    finally:
+        database.close()
+
+
+@outreach_app.command("approve")
+def approve_outreach(
+    outreach_id: str = typer.Argument(...),
+    revision: int | None = typer.Option(None, "--revision", min=1),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """人工确认草稿内容可以使用; 此命令不会发送消息."""
+    _perform_outreach_action(
+        outreach_id,
+        action=OutreachEventType.APPROVED.value,
+        revision=revision,
+        json_output=json_output,
+    )
+
+
+@outreach_app.command("mark-copied")
+def mark_outreach_copied(
+    outreach_id: str = typer.Argument(...),
+    revision: int | None = typer.Option(None, "--revision", min=1),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """记录用户已复制获批文案; 不会访问 BOSS."""
+    _perform_outreach_action(
+        outreach_id,
+        action=OutreachEventType.COPIED.value,
+        revision=revision,
+        json_output=json_output,
+    )
+
+
+@outreach_app.command("mark-opened")
+def mark_outreach_opened(
+    outreach_id: str = typer.Argument(...),
+    revision: int | None = typer.Option(None, "--revision", min=1),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """记录用户已自行打开岗位页面; 不会访问 BOSS."""
+    _perform_outreach_action(
+        outreach_id,
+        action=OutreachEventType.OPENED.value,
+        revision=revision,
+        json_output=json_output,
+    )
+
+
+@outreach_app.command("mark-sent")
+def mark_outreach_sent(
+    outreach_id: str = typer.Argument(...),
+    revision: int | None = typer.Option(None, "--revision", min=1),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """记录用户已在平台手动发送获批文案; 不会代为发送."""
+    _perform_outreach_action(
+        outreach_id,
+        action=OutreachEventType.SENT_CONFIRMED.value,
+        revision=revision,
+        json_output=json_output,
+    )
+
+
+@outreach_app.command("dismiss")
+def dismiss_outreach(
+    outreach_id: str = typer.Argument(...),
+    revision: int | None = typer.Option(None, "--revision", min=1),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """放弃最新草稿版本."""
+    _perform_outreach_action(
+        outreach_id,
+        action=OutreachEventType.DISMISSED.value,
+        revision=revision,
+        json_output=json_output,
+    )
+
+
+@notify_app.command("discovery")
+def notify_discovery_email(
+    run_id: str = typer.Argument(..., help="已保存的职位搜索批次 ID。"),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """将职位搜索批次发送到其候选人档案绑定的通知邮箱."""
+    settings = load_jobintel_settings()
+    console = _console()
+    database = JobIntelDatabase.connect(settings.jobintel_db_path)
+    try:
+        MigrationRunner(database).migrate()
+        repository = SQLiteJobRepository(database)
+        try:
+            run = repository.get_discovery_run(run_id)
+            preference = repository.get_candidate_email_preference(run.preference.candidate_id)
+            sender = build_email_sender(settings, recipient=preference.recipient_email)
+            if json_output:
+                receipt = DiscoveryEmailNotificationService(repository, sender).send_discovery(
+                    run_id, limit=limit
+                )
+            else:
+                with console.status("[bold]正在发送职位通知邮件…[/bold]"):
+                    receipt = DiscoveryEmailNotificationService(repository, sender).send_discovery(
+                        run_id, limit=limit
+                    )
+        except (EmailNotificationError, JobIntelError, RuntimeError, ValueError) as exc:
+            _abort(console, str(exc), code="EMAIL_NOTIFICATION_FAILED", json_output=json_output)
+        if json_output:
+            _emit_json(receipt.model_dump(mode="json"))
+        else:
+            console.print(
+                f"[green]已发送 {receipt.job_count} 个职位到 {receipt.recipient_masked}[/green]"
+            )
+    finally:
+        database.close()
+
+
 @app.command("analyze-discovery")
 def analyze_discovery(
     run_id: str = typer.Argument(..., help="Persisted discovery run ID."),
@@ -821,6 +1201,9 @@ def discover(
     employment_type: list[EmploymentType] | None = typer.Option(
         None, "--employment-type", help="Repeat to accept multiple employment types."
     ),
+    company_size: list[CompanySize] | None = typer.Option(
+        None, "--company-size", help="Repeat to accept multiple company-size bands."
+    ),
     education: list[str] | None = typer.Option(
         None, "--education", help="Repeat to accept multiple education labels."
     ),
@@ -879,6 +1262,7 @@ def discover(
             daily_salary_min_yuan=daily_salary_min,
             daily_salary_max_yuan=daily_salary_max,
             employment_types=tuple(employment_type or ()),
+            company_sizes=tuple(company_size or ()),
             education_requirements=tuple(education or ()),
             experience_requirements=tuple(experience or ()),
             include_undisclosed_salary=not strict_salary,

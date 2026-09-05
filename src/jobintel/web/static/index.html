@@ -25,41 +25,40 @@
         <span class="status-dot" id="browser-dot"></span>
         <div><strong id="browser-status">正在检查浏览器</strong><small>BOSS 本地连接</small></div>
       </div>
-      <p class="privacy-note">数据只保存在这台服务器。页面默认不对公网开放。</p>
     </aside>
 
     <main class="main">
       <header class="topbar">
         <button id="menu-button" class="icon-button" aria-label="打开导航">☰</button>
-        <div><p class="eyebrow" id="view-eyebrow">OVERVIEW</p><h1 id="view-title">求职工作台</h1></div>
+        <div><p class="eyebrow" id="view-eyebrow">概览</p><h1 id="view-title">求职工作台</h1></div>
         <div class="top-actions"><span class="provider-pill">模型 <b id="provider-name">—</b></span><button class="button secondary" id="refresh-button">刷新</button></div>
       </header>
 
       <section class="view active" id="view-dashboard">
         <div class="hero">
-          <div><p class="eyebrow">TODAY'S FOCUS</p><h2>从真实职位开始，做有证据的选择。</h2><p>先完善候选人档案，再发现职位、深入分析，并用低频雷达持续追踪变化。</p></div>
+          <div><p class="eyebrow">今日重点</p><h2>从真实职位开始，做有证据的选择。</h2><p>完善档案、发现职位、深入分析并持续追踪。</p></div>
           <button class="button primary large" data-go="discovery">开始找职位 <span>→</span></button>
         </div>
         <div class="metric-grid" id="metrics"></div>
         <div class="dashboard-grid">
           <article class="panel">
-            <div class="panel-heading"><div><p class="eyebrow">WORKFLOW</p><h3>推荐流程</h3></div></div>
+            <div class="panel-heading"><div><p class="eyebrow">求职流程</p><h3>推荐流程</h3></div></div>
             <div class="workflow">
               <button data-go="profiles"><b>01</b><span><strong>建立真实档案</strong><small>上传简历并确认可引用证据</small></span><i>→</i></button>
               <button data-go="discovery"><b>02</b><span><strong>发现匹配职位</strong><small>连接 BOSS，筛选并排序真实岗位</small></span><i>→</i></button>
-              <button data-go="analyses"><b>03</b><span><strong>深入分析机会</strong><small>查看匹配证据、短板和行动建议</small></span><i>→</i></button>
+              <button data-go="analyses"><b>03</b><span><strong>深入分析机会</strong><small>查看匹配证据并生成沟通草稿</small></span><i>→</i></button>
               <button data-go="radar"><b>04</b><span><strong>低频持续追踪</strong><small>发现新增、变化和疑似下线</small></span><i>→</i></button>
             </div>
           </article>
           <article class="panel">
-            <div class="panel-heading"><div><p class="eyebrow">RECENT</p><h3>最近搜索</h3></div><button class="text-button" data-go="discovery">查看全部</button></div>
+            <div class="panel-heading"><div><p class="eyebrow">最近记录</p><h3>最近搜索</h3></div><button class="text-button" data-go="discovery">查看全部</button></div>
             <div id="recent-discoveries" class="compact-list empty-state">暂无搜索记录</div>
           </article>
         </div>
       </section>
 
       <section class="view" id="view-profiles">
-        <div class="section-intro"><div><p class="eyebrow">CANDIDATE EVIDENCE</p><h2>候选人档案</h2><p>从真实简历提取可引用证据。预览不会入库，只有确认后才创建新版本。</p></div></div>
+        <div class="section-intro"><div><p class="eyebrow">候选人证据</p><h2>候选人档案</h2><p>从简历提取可用于岗位分析的经历与技能。</p></div></div>
         <div class="two-column">
           <article class="panel form-panel">
             <div class="panel-heading"><div><span class="step-tag">第一步</span><h3>上传并解析简历</h3></div></div>
@@ -76,18 +75,30 @@
             <div id="profile-preview" class="empty-state tall"><span class="empty-icon">▤</span><strong>等待简历解析</strong><p>解析后的摘要和证据会显示在这里。</p></div>
           </article>
         </div>
-        <article class="panel history-panel"><div class="panel-heading"><div><p class="eyebrow">PROFILES</p><h3>当前档案</h3></div></div><div id="profile-list" class="card-list"></div></article>
+        <article class="panel search-panel notification-panel">
+          <div class="panel-heading"><div><p class="eyebrow">邮件通知</p><h3>设置接收邮箱</h3><p>每个候选人可单独接收自己的职位搜索结果。</p></div><span id="notification-email-status" class="version">未设置</span></div>
+          <form id="notification-email-form">
+            <div class="form-grid notification-fields">
+              <label>候选人<select name="candidate_id" id="notification-candidate-select" required></select></label>
+              <label class="wide">接收邮箱<input name="recipient_email" type="email" maxlength="320" autocomplete="email" required placeholder="name@example.com"></label>
+              <button class="button primary" type="submit">保存通知邮箱</button>
+            </div>
+            <p class="field-help" id="notification-email-help">请选择候选人并填写接收邮箱。</p>
+          </form>
+        </article>
+        <article class="panel history-panel"><div class="panel-heading"><div><p class="eyebrow">档案记录</p><h3>当前档案</h3></div></div><div id="profile-list" class="card-list"></div></article>
       </section>
 
       <section class="view" id="view-discovery">
-        <div class="section-intro"><div><p class="eyebrow">LIVE FROM BOSS</p><h2>发现真实职位</h2><p>在已登录的本地 Chrome 中搜索。分页与详情抓取继续执行随机延时和风控熔断。</p></div></div>
+        <div class="section-intro"><div><p class="eyebrow">BOSS 职位</p><h2>发现真实职位</h2><p>搜索 BOSS 职位并按候选人匹配度排序。</p></div></div>
         <article class="panel search-panel">
           <form id="discovery-form">
             <div class="form-grid primary-fields">
               <label>候选人<select name="candidate_id" id="candidate-select" required></select></label>
-              <label class="wide">职位关键词<input name="query" required placeholder="例如 Agent 开发实习"></label>
-              <label>城市<input name="city" placeholder="北京"></label>
-              <label>职位类型<select name="employment_type"><option value="">不限</option><option value="internship">实习</option><option value="full_time">全职</option><option value="part_time">兼职</option><option value="other">其他/未知</option></select></label>
+              <label class="wide">职位关键词<input name="query" required value="Agent开发" placeholder="例如 Agent开发"></label>
+              <label>城市<input name="city" value="北京" placeholder="北京"></label>
+              <label>职位类型<select name="employment_type"><option value="">不限</option><option value="internship" selected>实习</option><option value="full_time">全职</option><option value="part_time">兼职</option><option value="other">其他/未知</option></select></label>
+              <label>公司规模<select name="company_size"><option value="">不限</option><option value="micro">0-20 人</option><option value="small">20-99 人</option><option value="medium">100-499 人</option><option value="large">500-999 人</option><option value="very_large">1000-9999 人</option><option value="enterprise">10000 人以上</option></select></label>
             </div>
             <details>
               <summary>更多筛选条件</summary>
@@ -99,7 +110,7 @@
                 <label>学历标签<input name="education" placeholder="本科，可用逗号分隔"></label>
                 <label>经验标签<input name="experience" placeholder="不限，应届生"></label>
                 <label class="wide">自定义排除词<input name="exclusions" placeholder="保险销售，课程顾问"></label>
-                <label>结果数量<input name="limit" type="number" min="1" max="500" value="50"></label>
+                <label>结果数量<input name="limit" type="number" min="1" max="500" value="10"></label>
                 <label>补全详情数<input name="detail_top" type="number" min="0" max="10" value="3"></label>
               </div>
               <div class="check-row">
@@ -109,26 +120,27 @@
                 <label><input type="checkbox" name="strict_salary">排除薪资面议</label>
               </div>
             </details>
-            <div class="form-actions"><p><span class="safe-dot"></span>最多补全 10 条详情，触发验证后立即停止</p><button class="button primary" type="submit">搜索 BOSS 职位 <span>→</span></button></div>
+            <div class="form-actions"><p><span class="safe-dot"></span>详情补全上限 10 条</p><button class="button primary" type="submit">搜索 BOSS 职位 <span>→</span></button></div>
           </form>
         </article>
         <div id="discovery-result" class="results-wrap"><div class="empty-state tall"><span class="empty-icon">⌕</span><strong>设置条件，开始搜索</strong><p>结果会按候选人证据和职位关键词确定性排序。</p></div></div>
+        <article class="panel discovery-history-panel"><div class="panel-heading"><div><p class="eyebrow">历史结果</p><h3>最近搜索批次</h3><p>打开已保存的搜索快照，不会再次访问 BOSS。</p></div></div><div id="discovery-history" class="compact-list"></div></article>
       </section>
 
       <section class="view" id="view-analyses">
-        <div class="section-intro"><div><p class="eyebrow">EVIDENCE-BASED DECISIONS</p><h2>深入分析</h2><p>分析已保存职位，不重复访问 BOSS。分数由程序计算，判断必须引用候选人证据。</p></div><button class="button secondary" id="reload-analyses">刷新列表</button></div>
+        <div class="section-intro"><div><p class="eyebrow">岗位匹配</p><h2>深入分析</h2><p>查看岗位匹配、证据、差距和沟通草稿。</p></div><button class="button secondary" id="reload-analyses">刷新列表</button></div>
         <div id="analysis-list" class="analysis-grid"></div>
       </section>
 
       <section class="view" id="view-radar">
-        <div class="section-intro"><div><p class="eyebrow">LOW-FREQUENCY MONITORING</p><h2>职位雷达</h2><p>基于一次成功搜索做增量检查。默认至少间隔 6 小时，异常零结果不会批量标记下线。</p></div></div>
+        <div class="section-intro"><div><p class="eyebrow">增量追踪</p><h2>职位雷达</h2><p>根据历史搜索检查新增、变化和疑似下线职位。</p></div></div>
         <div class="two-column radar-layout">
           <article class="panel form-panel">
             <div class="panel-heading"><div><h3>创建雷达检查</h3><p>请选择一次历史搜索或最新雷达结果作为基线。</p></div></div>
             <form id="radar-form">
               <label>基线搜索<select name="baseline_run_id" id="radar-baseline" required></select></label>
               <label>补全详情数<input name="detail_top" type="number" min="0" max="10" value="0"></label>
-              <p class="field-help">雷达会复用原搜索的全部筛选条件。请勿频繁绕过冷却时间。</p>
+              <p class="field-help">复用基线搜索条件，默认检查间隔为 6 小时。</p>
               <button class="button primary full" type="submit">检查职位变化</button>
             </form>
           </article>
@@ -140,7 +152,7 @@
   </div>
 
   <dialog id="detail-dialog"><button class="dialog-close" aria-label="关闭">×</button><div id="dialog-content"></div></dialog>
-  <div class="loading" id="loading" aria-live="polite"><div class="loader"></div><strong id="loading-text">正在处理…</strong><small>请保持页面开启</small></div>
+  <div class="loading" id="loading" aria-live="polite"><div class="loader"></div><strong id="loading-text">正在处理…</strong></div>
   <div class="toast" id="toast" role="status"></div>
   <script src="/static/app.js" defer></script>
 </body>

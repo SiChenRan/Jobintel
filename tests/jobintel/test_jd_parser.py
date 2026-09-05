@@ -30,6 +30,8 @@ Kubernetes experience is preferred.
 def test_parser_prompt_requires_simplified_chinese_requirements() -> None:
     assert PARSER_PROMPT_VERSION.endswith("zh-cn")
     assert "Requirement text must use concise Simplified Chinese" in PARSER_SYSTEM_PROMPT
+    assert "Generic duties must not be converted into skill requirements" in PARSER_SYSTEM_PROMPT
+    assert "LangChain" in PARSER_SYSTEM_PROMPT
 
 
 def _submission() -> dict[str, object]:
@@ -46,7 +48,7 @@ def _submission() -> dict[str, object]:
                 "normalized_skill": "Python",
             },
             {
-                "text": "Kubernetes experience",
+                "text": "Kubernetes experience is preferred",
                 "category": "skill",
                 "importance": "preferred",
                 "normalized_skill": "Kubernetes",
@@ -104,6 +106,33 @@ async def test_parser_schema_error_is_returned_as_safe_tool_result() -> None:
     assert repair.is_error is True  # type: ignore[attr-defined]
     assert "INVALID_PARSED_JOB" in repair.content  # type: ignore[attr-defined]
     assert _RAW_JD not in repair.content  # type: ignore[attr-defined]
+
+
+async def test_parser_repairs_skill_without_normalized_professional_name() -> None:
+    submission = _submission()
+    requirements = submission["requirements"]
+    assert isinstance(requirements, list)
+    requirements[0].pop("normalized_skill")
+    provider = FakeProvider(
+        [
+            TurnResult(
+                tool_calls=[
+                    ToolCall(
+                        id="unnormalized-skill",
+                        name=PARSER_SUBMIT_TOOL,
+                        arguments=submission,
+                    )
+                ]
+            ),
+            _parsed_turn(),
+        ]
+    )
+
+    result = await JDParserService(provider, max_repairs=1).parse(_RAW_JD)
+
+    assert result.telemetry.repairs == 1
+    repair = provider.received_messages[1][-1].blocks[0]
+    assert "INVALID_PARSED_JOB" in repair.content  # type: ignore[attr-defined]
 
 
 async def test_parser_rejects_mixed_or_wrong_calls_with_bounded_repairs() -> None:
@@ -165,6 +194,27 @@ async def test_raw_intake_requires_parser_and_request_can_generate_run_id(
 
     with pytest.raises(RuntimeError, match="requires a JDParserService"):
         await AnalysisIntakeService(jobintel_repo).resolve(request)
+
+
+async def test_raw_intake_reuses_identical_persisted_job_without_reparsing(
+    jobintel_repo: SQLiteJobRepository,
+) -> None:
+    parsed = await JDParserService(FakeProvider([_parsed_turn()]), clock=lambda: _NOW).parse(
+        _RAW_JD,
+        source_url="https://example.test/job",
+    )
+    jobintel_repo.insert_job(parsed.job)
+    unused_provider = FakeProvider([])
+
+    resolved = await AnalysisIntakeService(
+        jobintel_repo,
+        JDParserService(unused_provider),
+    ).resolve(AnalysisRequest(candidate_id="C001", jd_text=_RAW_JD))
+
+    assert resolved.job == parsed.job
+    assert resolved.is_raw_job is False
+    assert resolved.parser_telemetry is None
+    assert unused_provider.calls == 0
 
 
 async def test_parse_tool_supports_raw_jd_when_parser_is_injected(

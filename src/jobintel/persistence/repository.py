@@ -31,6 +31,20 @@ from jobintel.models import (
     JobPosting,
     JobRequirement,
 )
+from jobintel.notifications.models import (
+    CandidateEmailPreference,
+    EmailNotificationAttempt,
+    EmailNotificationStatus,
+)
+from jobintel.outreach.models import (
+    OutreachClaim,
+    OutreachDraft,
+    OutreachEvent,
+    OutreachEventAttribute,
+    OutreachEventType,
+    OutreachStatus,
+)
+from jobintel.outreach.state import validate_outreach_event
 from jobintel.persistence.db import JobIntelDatabase
 from jobintel.persistence.migrations import MigrationRunner
 
@@ -54,6 +68,14 @@ def _job_payload_sha256(job: JobPosting) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _outreach_payload_sha256(draft: OutreachDraft) -> str:
+    """Hash immutable revision content while excluding lifecycle timestamps/status."""
+    payload = _canonical_json(
+        draft.model_dump(mode="json", exclude={"status", "created_at", "updated_at"})
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class SQLiteJobRepository:
     """Map JobIntel domain aggregates to a current SQLite schema."""
 
@@ -71,6 +93,13 @@ class SQLiteJobRepository:
     def reset_all(self) -> None:
         """Delete all JobIntel domain rows without committing."""
         for table in (
+            "email_notification_attempts",
+            "candidate_email_preferences",
+            "outreach_events",
+            "outreach_claim_evidence",
+            "outreach_claim_requirements",
+            "outreach_claims",
+            "outreach_drafts",
             "radar_events",
             "radar_checks",
             "discovery_detail_attempts",
@@ -185,12 +214,12 @@ class SQLiteJobRepository:
             INSERT INTO discovered_jobs (
                 discovery_job_id, canonical_key, title, company_name, location,
                 salary_text, salary_min_k, salary_max_k, salary_daily_min_yuan,
-                salary_daily_max_yuan, employment_type, description, experience,
+                salary_daily_max_yuan, employment_type, company_size, description, experience,
                 education, published_text, skills_json, company_description,
                 recruiter_name, recruiter_title, recruiter_active_text,
                 detail_fetched_at, detail_content_sha256, source_links_json,
                 first_seen_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(discovery_job_id) DO UPDATE SET
                 title = excluded.title,
                 company_name = excluded.company_name,
@@ -201,6 +230,7 @@ class SQLiteJobRepository:
                 salary_daily_min_yuan = excluded.salary_daily_min_yuan,
                 salary_daily_max_yuan = excluded.salary_daily_max_yuan,
                 employment_type = excluded.employment_type,
+                company_size = excluded.company_size,
                 description = CASE
                     WHEN excluded.detail_fetched_at IS NOT NULL
                          OR discovered_jobs.detail_fetched_at IS NULL
@@ -252,6 +282,7 @@ class SQLiteJobRepository:
                 job.salary_daily_min_yuan,
                 job.salary_daily_max_yuan,
                 job.employment_type.value,
+                job.company_size.value,
                 job.description,
                 job.experience,
                 job.education,
@@ -371,6 +402,184 @@ class SQLiteJobRepository:
         values["source_links"] = json.loads(values.pop("source_links_json"))
         values["skills"] = json.loads(values.pop("skills_json"))
         return DiscoveredJob.model_validate(values)
+
+    def find_recruiter_name_for_source_url(self, source_url: str | None) -> str | None:
+        """Return an observed recruiter name for an exact cached source URL."""
+        if not source_url:
+            return None
+        rows = self._conn.execute(
+            """
+            SELECT recruiter_name, source_links_json FROM discovered_jobs
+            WHERE recruiter_name != '' ORDER BY last_seen_at DESC
+            """
+        ).fetchall()
+        for row in rows:
+            links = json.loads(row["source_links_json"])
+            if any(str(item.get("url", "")) == source_url for item in links):
+                return str(row["recruiter_name"])
+        return None
+
+    def save_candidate_email_preference(
+        self, preference: CandidateEmailPreference
+    ) -> CandidateEmailPreference:
+        """Create or replace one candidate-scoped notification recipient."""
+        try:
+            with self._database.transaction():
+                self.get_candidate_profile(preference.candidate_id)
+                self._conn.execute(
+                    """
+                    INSERT INTO candidate_email_preferences (
+                        candidate_id, recipient_email, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(candidate_id) DO UPDATE SET
+                        recipient_email = excluded.recipient_email,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        preference.candidate_id,
+                        preference.recipient_email,
+                        preference.created_at.isoformat(),
+                        preference.updated_at.isoformat(),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceValidationError(
+                f"candidate email preference violates database integrity: {preference.candidate_id}"
+            ) from exc
+        return self.get_candidate_email_preference(preference.candidate_id)
+
+    def find_candidate_email_preference(self, candidate_id: str) -> CandidateEmailPreference | None:
+        """Return a candidate's recipient setting when configured."""
+        row = self._conn.execute(
+            "SELECT * FROM candidate_email_preferences WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return CandidateEmailPreference.model_validate(dict(row))
+
+    def get_candidate_email_preference(self, candidate_id: str) -> CandidateEmailPreference:
+        """Return a candidate's recipient setting or a stable not-found error."""
+        preference = self.find_candidate_email_preference(candidate_id)
+        if preference is None:
+            raise EntityNotFoundError(
+                f"candidate notification email not configured: {candidate_id}"
+            )
+        return preference
+
+    def save_email_notification_attempt(
+        self, attempt: EmailNotificationAttempt
+    ) -> EmailNotificationAttempt:
+        """Persist one pending delivery marker before external SMTP activity."""
+        if attempt.status is not EmailNotificationStatus.PENDING:
+            raise PersistenceValidationError("new email notification attempt must be pending")
+        try:
+            with self._database.transaction():
+                self.get_discovery_run(attempt.discovery_run_id)
+                self._conn.execute(
+                    """
+                    INSERT INTO email_notification_attempts (
+                        notification_id, discovery_run_id, recipient_masked,
+                        job_count, status, subject_sha256, error_code,
+                        created_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt.notification_id,
+                        attempt.discovery_run_id,
+                        attempt.recipient_masked,
+                        attempt.job_count,
+                        attempt.status.value,
+                        attempt.subject_sha256,
+                        attempt.error_code,
+                        attempt.created_at.isoformat(),
+                        None,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceValidationError(
+                f"email notification attempt violates database integrity: {attempt.notification_id}"
+            ) from exc
+        return self.get_email_notification_attempt(attempt.notification_id)
+
+    def complete_email_notification_attempt(
+        self, attempt: EmailNotificationAttempt
+    ) -> EmailNotificationAttempt:
+        """Atomically finalize one previously pending delivery attempt."""
+        if attempt.status is EmailNotificationStatus.PENDING:
+            raise PersistenceValidationError("completed email notification cannot be pending")
+        current = self.get_email_notification_attempt(attempt.notification_id)
+        immutable_fields = (
+            "discovery_run_id",
+            "recipient_masked",
+            "job_count",
+            "subject_sha256",
+            "created_at",
+        )
+        if any(getattr(current, field) != getattr(attempt, field) for field in immutable_fields):
+            raise IdempotencyConflictError(
+                f"email notification identity changed: {attempt.notification_id}"
+            )
+        if current.status is not EmailNotificationStatus.PENDING:
+            if current == attempt:
+                return current
+            raise IdempotencyConflictError(
+                f"email notification already completed: {attempt.notification_id}"
+            )
+        with self._database.transaction():
+            cursor = self._conn.execute(
+                """
+                UPDATE email_notification_attempts
+                SET status = ?, error_code = ?, completed_at = ?
+                WHERE notification_id = ? AND status = ?
+                """,
+                (
+                    attempt.status.value,
+                    attempt.error_code,
+                    attempt.completed_at.isoformat() if attempt.completed_at else None,
+                    attempt.notification_id,
+                    EmailNotificationStatus.PENDING.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise IdempotencyConflictError(
+                    f"email notification changed concurrently: {attempt.notification_id}"
+                )
+        return self.get_email_notification_attempt(attempt.notification_id)
+
+    def get_email_notification_attempt(self, notification_id: str) -> EmailNotificationAttempt:
+        """Return one content-minimal delivery audit record."""
+        row = self._conn.execute(
+            "SELECT * FROM email_notification_attempts WHERE notification_id = ?",
+            (notification_id,),
+        ).fetchone()
+        if row is None:
+            raise EntityNotFoundError(f"email notification not found: {notification_id}")
+        return EmailNotificationAttempt.model_validate(dict(row))
+
+    def list_email_notification_attempts(
+        self, *, discovery_run_id: str | None = None, limit: int = 50
+    ) -> tuple[EmailNotificationAttempt, ...]:
+        """List recent delivery receipts without message bodies or raw addresses."""
+        if not 1 <= limit <= 500:
+            raise ValueError("email notification list limit must be between 1 and 500")
+        if discovery_run_id is None:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM email_notification_attempts
+                ORDER BY created_at DESC, notification_id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM email_notification_attempts WHERE discovery_run_id = ?
+                ORDER BY created_at DESC, notification_id DESC LIMIT ?
+                """,
+                (discovery_run_id, limit),
+            ).fetchall()
+        return tuple(EmailNotificationAttempt.model_validate(dict(row)) for row in rows)
 
     def save_radar_check(self, check: RadarCheck) -> RadarCheck:
         """Atomically persist one already-computed radar comparison."""
@@ -721,11 +930,364 @@ class SQLiteJobRepository:
             "jobs": "SELECT COUNT(*) FROM discovered_jobs",
             "analyses": "SELECT COUNT(*) FROM application_analyses",
             "radar_checks": "SELECT COUNT(*) FROM radar_checks",
+            "outreach_drafts": "SELECT COUNT(*) FROM outreach_drafts",
         }
         return {
             name: int(self._conn.execute(statement).fetchone()[0])
             for name, statement in tables.items()
         }
+
+    # --- reviewed HR outreach ------------------------------------------------
+
+    def save_outreach(self, draft: OutreachDraft) -> OutreachDraft:
+        """Atomically persist one immutable draft revision with normalized citations."""
+        payload_sha256 = _outreach_payload_sha256(draft)
+        try:
+            with self._database.transaction():
+                existing = self._conn.execute(
+                    """
+                    SELECT payload_sha256 FROM outreach_drafts
+                    WHERE outreach_id = ? AND revision = ?
+                    """,
+                    (draft.outreach_id, draft.revision),
+                ).fetchone()
+                if existing is not None:
+                    if existing["payload_sha256"] != payload_sha256:
+                        raise IdempotencyConflictError(
+                            "outreach revision already exists with different content: "
+                            f"{draft.outreach_id}@{draft.revision}"
+                        )
+                    return self.get_outreach(draft.outreach_id, draft.revision)
+                self._validate_outreach_scope(draft)
+                self._insert_outreach_rows(draft, payload_sha256)
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceValidationError(
+                "outreach aggregate violates database integrity: "
+                f"{draft.outreach_id}@{draft.revision}"
+            ) from exc
+        return self.get_outreach(draft.outreach_id, draft.revision)
+
+    def _validate_outreach_scope(self, draft: OutreachDraft) -> None:
+        """Recheck analysis, job, profile, requirement, and evidence ownership."""
+        analysis = self.get_analysis(draft.analysis_id)
+        expected_scope = (
+            analysis.job_id,
+            analysis.job_version,
+            analysis.candidate_id,
+            analysis.profile_version,
+        )
+        actual_scope = (
+            draft.job_id,
+            draft.job_version,
+            draft.candidate_id,
+            draft.profile_version,
+        )
+        if actual_scope != expected_scope:
+            raise PersistenceValidationError("outreach scope does not match its analysis")
+        job = self.get_job(draft.job_id, draft.job_version)
+        profile = self.get_candidate_profile(draft.candidate_id, draft.profile_version)
+        requirement_ids = {item.requirement_id for item in job.requirements}
+        evidence_ids = {item.evidence_id for item in profile.evidence}
+        for claim in draft.claims:
+            if not set(claim.requirement_ids) <= requirement_ids:
+                raise PersistenceValidationError(
+                    f"outreach claim references unknown requirement: {claim.claim_id}"
+                )
+            if not set(claim.evidence_ids) <= evidence_ids:
+                raise PersistenceValidationError(
+                    f"outreach claim references unknown evidence: {claim.claim_id}"
+                )
+
+    def _insert_outreach_rows(self, draft: OutreachDraft, payload_sha256: str) -> None:
+        """Insert one already-validated outreach revision inside a transaction."""
+        self._conn.execute(
+            """
+            INSERT INTO outreach_drafts (
+                outreach_id, revision, analysis_id, job_id, job_version,
+                candidate_id, profile_version, channel, tone, salutation,
+                motivation, conversation_opener, closing, rendered_message,
+                user_edited_message, status, provider, prompt_version,
+                schema_version, provenance_digest, payload_sha256, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                draft.outreach_id,
+                draft.revision,
+                draft.analysis_id,
+                draft.job_id,
+                draft.job_version,
+                draft.candidate_id,
+                draft.profile_version,
+                draft.channel.value,
+                draft.tone.value,
+                draft.salutation,
+                draft.motivation,
+                draft.conversation_opener,
+                draft.closing,
+                draft.rendered_message,
+                draft.user_edited_message,
+                draft.status.value,
+                draft.provider,
+                draft.prompt_version,
+                draft.schema_version,
+                draft.provenance_digest,
+                payload_sha256,
+                draft.created_at.isoformat(),
+                draft.updated_at.isoformat(),
+            ),
+        )
+        for claim in draft.claims:
+            self._conn.execute(
+                """
+                INSERT INTO outreach_claims
+                    (outreach_id, revision, claim_id, source_order, text)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    draft.outreach_id,
+                    draft.revision,
+                    claim.claim_id,
+                    claim.source_order,
+                    claim.text,
+                ),
+            )
+            for order, requirement_id in enumerate(claim.requirement_ids):
+                self._conn.execute(
+                    """
+                    INSERT INTO outreach_claim_requirements (
+                        outreach_id, revision, claim_id, requirement_id,
+                        reference_order, job_id, job_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        draft.outreach_id,
+                        draft.revision,
+                        claim.claim_id,
+                        requirement_id,
+                        order,
+                        draft.job_id,
+                        draft.job_version,
+                    ),
+                )
+            for order, evidence_id in enumerate(claim.evidence_ids):
+                self._conn.execute(
+                    """
+                    INSERT INTO outreach_claim_evidence (
+                        outreach_id, revision, claim_id, evidence_id,
+                        citation_order, candidate_id, profile_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        draft.outreach_id,
+                        draft.revision,
+                        claim.claim_id,
+                        evidence_id,
+                        order,
+                        draft.candidate_id,
+                        draft.profile_version,
+                    ),
+                )
+
+    def get_outreach(self, outreach_id: str, revision: int | None = None) -> OutreachDraft:
+        """Return one exact outreach revision or the newest revision when omitted."""
+        if revision is None:
+            row = self._conn.execute(
+                """
+                SELECT * FROM outreach_drafts WHERE outreach_id = ?
+                ORDER BY revision DESC LIMIT 1
+                """,
+                (outreach_id,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """
+                SELECT * FROM outreach_drafts WHERE outreach_id = ? AND revision = ?
+                """,
+                (outreach_id, revision),
+            ).fetchone()
+        if row is None:
+            suffix = "latest" if revision is None else str(revision)
+            raise EntityNotFoundError(f"outreach not found: {outreach_id}@{suffix}")
+        return self._outreach_from_row(row)
+
+    def _outreach_from_row(self, row: sqlite3.Row) -> OutreachDraft:
+        """Rehydrate a draft revision and its ordered claims/citations."""
+        claim_rows = self._conn.execute(
+            """
+            SELECT * FROM outreach_claims
+            WHERE outreach_id = ? AND revision = ? ORDER BY source_order
+            """,
+            (row["outreach_id"], row["revision"]),
+        ).fetchall()
+        claims: list[OutreachClaim] = []
+        for claim_row in claim_rows:
+            requirement_rows = self._conn.execute(
+                """
+                SELECT requirement_id FROM outreach_claim_requirements
+                WHERE outreach_id = ? AND revision = ? AND claim_id = ?
+                ORDER BY reference_order
+                """,
+                (row["outreach_id"], row["revision"], claim_row["claim_id"]),
+            ).fetchall()
+            evidence_rows = self._conn.execute(
+                """
+                SELECT evidence_id FROM outreach_claim_evidence
+                WHERE outreach_id = ? AND revision = ? AND claim_id = ?
+                ORDER BY citation_order
+                """,
+                (row["outreach_id"], row["revision"], claim_row["claim_id"]),
+            ).fetchall()
+            claims.append(
+                OutreachClaim(
+                    claim_id=claim_row["claim_id"],
+                    source_order=claim_row["source_order"],
+                    text=claim_row["text"],
+                    requirement_ids=tuple(item["requirement_id"] for item in requirement_rows),
+                    evidence_ids=tuple(item["evidence_id"] for item in evidence_rows),
+                )
+            )
+        payload = dict(row)
+        payload.pop("payload_sha256")
+        payload["claims"] = claims
+        return OutreachDraft.model_validate(payload)
+
+    def list_outreach(
+        self, *, candidate_id: str | None = None, limit: int = 50
+    ) -> tuple[OutreachDraft, ...]:
+        """Return newest revision of each outreach, optionally for one candidate."""
+        if not 1 <= limit <= 500:
+            raise ValueError("outreach list limit must be between 1 and 500")
+        parameters: tuple[object, ...]
+        where = ""
+        if candidate_id is None:
+            parameters = (limit,)
+        else:
+            where = "WHERE d.candidate_id = ?"
+            parameters = (candidate_id, limit)
+        rows = self._conn.execute(
+            f"""
+            SELECT d.* FROM outreach_drafts AS d
+            JOIN (
+                SELECT outreach_id, MAX(revision) AS revision
+                FROM outreach_drafts GROUP BY outreach_id
+            ) AS latest
+              ON latest.outreach_id = d.outreach_id AND latest.revision = d.revision
+            {where}
+            ORDER BY d.updated_at DESC, d.outreach_id DESC LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+        return tuple(self._outreach_from_row(row) for row in rows)
+
+    def list_outreach_for_analysis(self, analysis_id: str) -> tuple[OutreachDraft, ...]:
+        """Return newest revision of every draft generated for one analysis."""
+        rows = self._conn.execute(
+            """
+            SELECT d.* FROM outreach_drafts AS d
+            JOIN (
+                SELECT outreach_id, MAX(revision) AS revision
+                FROM outreach_drafts WHERE analysis_id = ? GROUP BY outreach_id
+            ) AS latest
+              ON latest.outreach_id = d.outreach_id AND latest.revision = d.revision
+            WHERE d.analysis_id = ?
+            ORDER BY d.updated_at DESC, d.outreach_id DESC
+            """,
+            (analysis_id, analysis_id),
+        ).fetchall()
+        return tuple(self._outreach_from_row(row) for row in rows)
+
+    def apply_outreach_event(self, event: OutreachEvent) -> OutreachDraft:
+        """Atomically append one action event and apply its validated state change."""
+        try:
+            with self._database.transaction():
+                existing = self._conn.execute(
+                    "SELECT * FROM outreach_events WHERE event_id = ?", (event.event_id,)
+                ).fetchone()
+                if existing is not None:
+                    stored = self._outreach_event_from_row(existing)
+                    if stored != event:
+                        raise IdempotencyConflictError(
+                            f"outreach event key already exists: {event.event_id}"
+                        )
+                    return self.get_outreach(event.outreach_id, event.revision)
+                draft = self.get_outreach(event.outreach_id, event.revision)
+                latest = self.get_outreach(event.outreach_id)
+                if latest.revision != event.revision:
+                    raise IdempotencyConflictError(
+                        f"outreach revision is stale: {event.outreach_id}@{event.revision}"
+                    )
+                if draft.status is not event.from_status:
+                    raise IdempotencyConflictError(
+                        f"outreach status changed: expected {event.from_status.value}, "
+                        f"found {draft.status.value}"
+                    )
+                validate_outreach_event(draft.status, event.event_type)
+                expected_target = {
+                    OutreachEventType.APPROVED: OutreachStatus.APPROVED,
+                    OutreachEventType.SENT_CONFIRMED: OutreachStatus.SENT_CONFIRMED,
+                    OutreachEventType.DISMISSED: OutreachStatus.DISMISSED,
+                    OutreachEventType.COPIED: draft.status,
+                    OutreachEventType.OPENED: draft.status,
+                }[event.event_type]
+                if event.to_status is not expected_target:
+                    raise PersistenceValidationError("outreach event target status is invalid")
+                self._conn.execute(
+                    """
+                    UPDATE outreach_drafts SET status = ?, updated_at = ?
+                    WHERE outreach_id = ? AND revision = ?
+                    """,
+                    (
+                        event.to_status.value,
+                        event.created_at.isoformat(),
+                        event.outreach_id,
+                        event.revision,
+                    ),
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO outreach_events (
+                        event_id, outreach_id, revision, event_type, from_status,
+                        to_status, attributes_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        event.outreach_id,
+                        event.revision,
+                        event.event_type.value,
+                        event.from_status.value,
+                        event.to_status.value,
+                        _canonical_json(
+                            [item.model_dump(mode="json") for item in event.attributes]
+                        ),
+                        event.created_at.isoformat(),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceValidationError(
+                f"outreach event violates database integrity: {event.event_id}"
+            ) from exc
+        return self.get_outreach(event.outreach_id, event.revision)
+
+    def list_outreach_events(self, outreach_id: str) -> tuple[OutreachEvent, ...]:
+        """Return the append-only audit history for one outreach."""
+        rows = self._conn.execute(
+            """
+            SELECT * FROM outreach_events WHERE outreach_id = ?
+            ORDER BY created_at, event_id
+            """,
+            (outreach_id,),
+        ).fetchall()
+        return tuple(self._outreach_event_from_row(row) for row in rows)
+
+    @staticmethod
+    def _outreach_event_from_row(row: sqlite3.Row) -> OutreachEvent:
+        payload = dict(row)
+        payload["attributes"] = tuple(
+            OutreachEventAttribute.model_validate(item)
+            for item in json.loads(payload.pop("attributes_json"))
+        )
+        return OutreachEvent.model_validate(payload)
 
     def get_analysis(self, analysis_id: str) -> JobAnalysis:
         """Rehydrate a complete analysis, matches, and evidence links."""

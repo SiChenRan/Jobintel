@@ -18,7 +18,12 @@ from jobintel.models import (
 )
 from jobintel.ports import JobRepository
 from jobintel.provenance import PROVENANCE_VERSION, ProvenanceLedger
-from jobintel.scoring import SCORING_VERSION, derive_recommendation, score_requirements
+from jobintel.scoring import (
+    SCORING_VERSION,
+    derive_recommendation,
+    is_scoreable_requirement,
+    score_requirements,
+)
 from jobintel.tool_contracts import STORED_REQUIREMENTS_PARSER_VERSION, TOOLSET_VERSION
 
 DEFAULT_PROMPT_VERSION = "jobintel-agent-v1"
@@ -98,6 +103,7 @@ class AnalysisService:
                 skill=requirement.normalized_skill or requirement.text,
             )
             for requirement in job.requirements
+            if is_scoreable_requirement(requirement)
             if next(
                 match
                 for match in draft.requirement_matches

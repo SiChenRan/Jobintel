@@ -13,7 +13,7 @@ from pydantic import Field, HttpUrl, field_validator, model_validator
 
 from jobintel.models import FrozenDomainModel, NonEmptyStr, UtcDateTime
 
-DISCOVERY_SCHEMA_VERSION = "jobintel-discovery-v3"
+DISCOVERY_SCHEMA_VERSION = "jobintel-discovery-v4"
 
 
 class JobSource(StrEnum):
@@ -53,6 +53,18 @@ class EmploymentType(StrEnum):
     OTHER = "other"
 
 
+class CompanySize(StrEnum):
+    """Normalized company headcount bands exposed by job sources."""
+
+    MICRO = "micro"
+    SMALL = "small"
+    MEDIUM = "medium"
+    LARGE = "large"
+    VERY_LARGE = "very_large"
+    ENTERPRISE = "enterprise"
+    UNKNOWN = "unknown"
+
+
 class RadarEventStatus(StrEnum):
     """Change classification between two successful discovery snapshots."""
 
@@ -75,6 +87,7 @@ class JobSearchPreference(FrozenDomainModel):
     daily_salary_max_yuan: int | None = Field(default=None, ge=0, le=10000)
     include_undisclosed_salary: bool = True
     employment_types: tuple[EmploymentType, ...] = ()
+    company_sizes: tuple[CompanySize, ...] = ()
     education_requirements: tuple[NonEmptyStr, ...] = ()
     experience_requirements: tuple[NonEmptyStr, ...] = ()
     exclusions: tuple[NonEmptyStr, ...] = ()
@@ -99,6 +112,16 @@ class JobSearchPreference(FrozenDomainModel):
         """Reject repeated employment-type filters."""
         if len(values) != len(set(values)):
             raise ValueError("employment types must be unique")
+        return values
+
+    @field_validator("company_sizes")
+    @classmethod
+    def unique_company_sizes(cls, values: tuple[CompanySize, ...]) -> tuple[CompanySize, ...]:
+        """Reject repeated company-size filters and the unknown sentinel."""
+        if len(values) != len(set(values)):
+            raise ValueError("company sizes must be unique")
+        if CompanySize.UNKNOWN in values:
+            raise ValueError("unknown company size cannot be used as a filter")
         return values
 
     @model_validator(mode="after")
@@ -136,6 +159,7 @@ class RawJobListing(FrozenDomainModel):
     experience: str = ""
     education: str = ""
     employment_type: EmploymentType = EmploymentType.OTHER
+    company_size: CompanySize = CompanySize.UNKNOWN
     url: HttpUrl
     published_text: str = ""
 
@@ -202,6 +226,7 @@ class DiscoveredJob(FrozenDomainModel):
     salary_daily_min_yuan: int | None = Field(default=None, ge=0)
     salary_daily_max_yuan: int | None = Field(default=None, ge=0)
     employment_type: EmploymentType = EmploymentType.OTHER
+    company_size: CompanySize = CompanySize.UNKNOWN
     description: str = ""
     experience: str = ""
     education: str = ""
@@ -432,6 +457,21 @@ def infer_employment_type(*values: str) -> EmploymentType:
     if "全职" in normalized or "fulltime" in normalized:
         return EmploymentType.FULL_TIME
     return EmploymentType.OTHER
+
+
+def parse_company_size(value: str) -> CompanySize:
+    """Normalize BOSS-style headcount labels without guessing absent values."""
+    normalized = _canonical_text(value).replace("人", "")
+    mapping = {
+        "0-20": CompanySize.MICRO,
+        "20-99": CompanySize.SMALL,
+        "100-499": CompanySize.MEDIUM,
+        "500-999": CompanySize.LARGE,
+        "1000-9999": CompanySize.VERY_LARGE,
+        "10000以上": CompanySize.ENTERPRISE,
+        "10000+": CompanySize.ENTERPRISE,
+    }
+    return mapping.get(normalized, CompanySize.UNKNOWN)
 
 
 def utc_now() -> datetime:

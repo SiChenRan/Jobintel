@@ -7,9 +7,15 @@ from typing import Self
 
 from pydantic import Field, model_validator
 
+from jobintel.errors import EntityNotFoundError
 from jobintel.models import FrozenDomainModel, JobPosting, NonEmptyStr
 from jobintel.ports import JobRepository
-from jobintel.services.jd_parser import JDParserService, ParserTelemetry
+from jobintel.services.jd_parser import (
+    JDParserService,
+    ParserTelemetry,
+    raw_job_id,
+    raw_source_sha256,
+)
 from jobintel.tool_contracts import STORED_REQUIREMENTS_PARSER_VERSION
 
 
@@ -78,6 +84,21 @@ class AnalysisIntakeService:
             raise RuntimeError("raw JD intake requires a JDParserService")
         if request.jd_text is None:  # validated by AnalysisRequest
             raise RuntimeError("raw JD request has no text")
+        staged_job_id = raw_job_id(request.jd_text)
+        try:
+            stored_job = self._repository.get_job(staged_job_id)
+        except EntityNotFoundError:
+            pass
+        else:
+            if stored_job.source_sha256 != raw_source_sha256(request.jd_text):
+                raise RuntimeError("stored raw job identity does not match source content")
+            return ResolvedAnalysisIntake(
+                job=stored_job,
+                candidate_id=profile.candidate_id,
+                profile_version=profile.profile_version,
+                is_raw_job=False,
+                parser_version=STORED_REQUIREMENTS_PARSER_VERSION,
+            )
         parsed = await self._parser.parse(request.jd_text, source_url=request.jd_source_url)
         return ResolvedAnalysisIntake(
             job=parsed.job,

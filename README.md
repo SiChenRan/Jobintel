@@ -15,11 +15,15 @@ JobIntel 是一个面向中文求职场景的本地优先智能助手。它把�
 - 使用 Anthropic、OpenAI 或 DeepSeek 分析岗位匹配度
 - 输出中文的优势、差距、证据引用、行动建议和推荐等级
 - 保存发现批次和分析记录，支持列表查询与重新分析
+- 按城市、职位类型、薪资和 BOSS 公司规模筛选职位
 - 配置职位雷达，按冷却时间检查新的匹配职位
 - 提供本地 Web 页面，覆盖主要简历、发现、分析和雷达操作
 - 通过 FastMCP 暴露与进程内工具箱一致的工具契约
+- 根据岗位分析和简历证据生成中文 HR 打招呼、自我介绍与交流问题
+- 保存、编辑和审批沟通草稿，并记录复制、打开岗位和人工已发送事件
+- 将已保存搜索批次的职位摘要和原始链接发送到固定通知邮箱
 
-当前不会自动向 HR 发消息，也不会代替用户投递。沟通文案和人工确认后的发送流程适合后续版本实现。
+当前不会自动向 HR 发消息，也不会代替用户投递。沟通草稿已接入 CLI 和 Web 分析详情页，见 [`docs/HR_OUTREACH_DESIGN.md`](docs/HR_OUTREACH_DESIGN.md)。
 
 ## 快速开始
 
@@ -46,11 +50,19 @@ DEEPSEEK_API_KEY=your-key
 uv run jobintel web
 ```
 
+Web 岗位搜索默认使用“Agent开发 / 北京 / 实习 / 10 个岗位”。公司规模默认不限，
+可按 BOSS 披露的 `0-20 人`、`20-99 人`、`100-499 人` 等区间筛选；启用规模筛选时，
+未披露规模的职位不会混入结果。
+
 默认访问 `http://127.0.0.1:8000`。需要局域网访问时可使用：
 
 ```bash
 uv run jobintel web --host 0.0.0.0 --port 8000
 ```
+
+在“深入分析”中打开一条分析，即可生成、编辑和批准沟通草稿，并在人工发送后记录状态。
+
+深入分析的数值评分只计算可验证的硬性要求，例如 Python、LangChain、RAG、数据库、框架、明确学历、语言或经验年限。岗位职责、协作方式、产品愿景和难以量化的业务结果仍会展示，但不会参与分数计算。
 
 ## 连接 BOSS 直聘
 
@@ -112,6 +124,7 @@ uv run jobintel discover \
   --candidate-id C001 \
   --query "Python 后端" \
   --city 上海 \
+  --company-size small \
   --salary-min 20 \
   --limit 50 \
   --analyze-top 3
@@ -132,6 +145,26 @@ uv run jobintel radar check --candidate-id C001
 uv run jobintel radar show --candidate-id C001
 ```
 
+根据一条已保存的深入分析生成并审核 HR 沟通草稿：
+
+```bash
+uv run jobintel outreach generate --analysis-id <分析ID> --tone professional
+uv run jobintel outreach show <草稿ID>
+uv run jobintel outreach approve <草稿ID>
+# 在 BOSS 直聘中人工发送后，再记录结果
+uv run jobintel outreach mark-sent <草稿ID>
+```
+
+`generate` 只调用 LLM 生成结构化草稿，不访问 BOSS；`approve` 和 `mark-sent` 也只更新本地状态。
+
+发送职位搜索结果邮件：
+
+```bash
+uv run jobintel notify discovery <搜索批次ID>
+```
+
+SMTP 配置和安全边界见 [`docs/EMAIL_NOTIFICATIONS.md`](docs/EMAIL_NOTIFICATIONS.md)。
+
 启动 MCP 服务：
 
 ```bash
@@ -149,6 +182,8 @@ uv run jobintel serve-mcp
 - `DISCOVERY_DETAIL_CACHE_HOURS`：职位详情缓存时间
 - `RADAR_MIN_INTERVAL_HOURS`：同一雷达的最短检查间隔
 - `AGENT_MAX_*`：模型循环、修复和工具调用上限
+- `OUTREACH_MAX_REPAIRS`：沟通草稿结构或证据校验失败后的最大修复次数
+- `SMTP_*`：服务器统一使用的 SMTP 发件账号与连接配置；各候选人的接收邮箱在 Web 中设置
 
 `.env`、SQLite 数据库和生成的简历预览均被 Git 忽略。请勿提交 API 密钥、浏览器配置或个人求职数据。
 
@@ -169,6 +204,7 @@ src/jobintel/
 ├── agent/          # 模型循环、提示词和进程内工具箱
 ├── discovery/      # BOSS/CDP 连接器与发现服务
 ├── mcp_server/     # FastMCP 适配层
+├── outreach/       # HR 沟通草稿、状态机、Prompt 与 Evidence Guardrail
 ├── persistence/    # SQLite、迁移、仓储和种子数据
 ├── providers/      # Anthropic/OpenAI/DeepSeek 适配器
 ├── services/       # 简历、JD、分析、证据和雷达服务
