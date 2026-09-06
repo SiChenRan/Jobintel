@@ -467,6 +467,75 @@ _DISCOVERY_COMPANY_SIZE_SCHEMA = (
     """,
 )
 
+_DISCOVERY_PROFILE_RANKING_SCHEMA = (
+    """
+    ALTER TABLE discovery_runs
+        ADD COLUMN profile_snapshot_json TEXT NOT NULL DEFAULT '{}'
+    """,
+    """
+    ALTER TABLE discovery_run_jobs
+        ADD COLUMN rank_explanation_json TEXT NOT NULL DEFAULT '{}'
+    """,
+)
+
+_WEB_AUTH_SCHEMA = (
+    """
+    CREATE TABLE web_users (
+        user_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        username_normalized TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_login_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE web_sessions (
+        session_digest TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        csrf_token TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES web_users(user_id) ON DELETE CASCADE
+    )
+    """,
+    "CREATE INDEX idx_web_sessions_expiry ON web_sessions(expires_at)",
+)
+
+_WEB_USER_ROLES_SCHEMA = (
+    "ALTER TABLE web_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'",
+    "ALTER TABLE web_users ADD COLUMN candidate_id TEXT",
+    "ALTER TABLE web_users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+    """
+    CREATE UNIQUE INDEX idx_web_users_candidate
+        ON web_users(candidate_id) WHERE candidate_id IS NOT NULL
+    """,
+)
+
+_WEB_USER_PROFILE_SCHEMA = (
+    "ALTER TABLE web_users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE web_users ADD COLUMN email TEXT",
+    "ALTER TABLE web_users ADD COLUMN email_normalized TEXT",
+    "UPDATE web_users SET display_name = username WHERE display_name = ''",
+    """
+    CREATE UNIQUE INDEX idx_web_users_email
+        ON web_users(email_normalized) WHERE email_normalized IS NOT NULL
+    """,
+)
+
+_WEB_RUNTIME_SETTINGS_SCHEMA = (
+    """
+    CREATE TABLE web_runtime_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value_json TEXT NOT NULL,
+        is_secret INTEGER NOT NULL CHECK (is_secret IN (0, 1)),
+        updated_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        FOREIGN KEY (updated_by) REFERENCES web_users(user_id)
+    )
+    """,
+)
+
 
 @dataclass(frozen=True)
 class Migration:
@@ -509,6 +578,11 @@ MIGRATIONS = (
     Migration(7, "jobintel_discovery_email_notifications", _EMAIL_NOTIFICATION_SCHEMA),
     Migration(8, "jobintel_candidate_email_preferences", _CANDIDATE_EMAIL_PREFERENCE_SCHEMA),
     Migration(9, "jobintel_discovery_company_size", _DISCOVERY_COMPANY_SIZE_SCHEMA),
+    Migration(10, "jobintel_candidate_aware_discovery", _DISCOVERY_PROFILE_RANKING_SCHEMA),
+    Migration(11, "jobintel_web_authentication", _WEB_AUTH_SCHEMA),
+    Migration(12, "jobintel_web_user_roles", _WEB_USER_ROLES_SCHEMA),
+    Migration(13, "jobintel_web_user_profiles", _WEB_USER_PROFILE_SCHEMA),
+    Migration(14, "jobintel_web_runtime_settings", _WEB_RUNTIME_SETTINGS_SCHEMA),
 )
 
 

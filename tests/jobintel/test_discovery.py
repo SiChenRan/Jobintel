@@ -12,6 +12,8 @@ from jobintel.discovery.models import (
     CompanySize,
     DetailFetchResult,
     DetailFetchStatus,
+    DiscoveryChannel,
+    DiscoveryMode,
     DiscoveryRun,
     EmploymentType,
     JobSearchPreference,
@@ -176,6 +178,51 @@ def test_company_size_filter_excludes_other_and_undisclosed_sizes(
     assert [hit.job.company_name for hit in run.hits] == ["小型团队"]
     assert run.hits[0].job.company_size is CompanySize.SMALL
     assert run.filtered_out == 2
+
+
+def test_discovery_marks_candidate_history_and_can_return_only_new_jobs(
+    jobintel_repo: SQLiteJobRepository,
+) -> None:
+    old = _listing(
+        JobSource.BOSS,
+        "old",
+        title="Python 后端实习",
+        company="历史公司",
+    )
+    new = _listing(
+        JobSource.BOSS,
+        "new",
+        title="Agent 开发实习",
+        company="新公司",
+        description="Python LangChain Agent",
+    ).model_copy(update={"acquisition_channels": (DiscoveryChannel.RECOMMENDATION,)})
+    preference = JobSearchPreference(
+        candidate_id="C001",
+        query="Agent Python",
+        discovery_mode=DiscoveryMode.HYBRID,
+        limit=10,
+    )
+
+    first = JobDiscoveryService(
+        jobintel_repo,
+        {JobSource.BOSS: FakeConnector(JobSource.BOSS, (old,))},
+    ).discover(preference)
+    assert first.hits[0].is_new_to_candidate is True
+
+    second = JobDiscoveryService(
+        jobintel_repo,
+        {JobSource.BOSS: FakeConnector(JobSource.BOSS, (old, new))},
+    ).discover(preference, persist=False)
+    assert [hit.job.company_name for hit in second.hits] == ["新公司", "历史公司"]
+    assert [hit.is_new_to_candidate for hit in second.hits] == [True, False]
+    assert second.hits[0].job.acquisition_channels == (DiscoveryChannel.RECOMMENDATION,)
+
+    only_new = JobDiscoveryService(
+        jobintel_repo,
+        {JobSource.BOSS: FakeConnector(JobSource.BOSS, (old, new))},
+    ).discover(preference.model_copy(update={"only_new": True}), persist=False)
+    assert [hit.job.company_name for hit in only_new.hits] == ["新公司"]
+    assert only_new.filtered_out == 1
 
 
 def test_daily_salary_and_internship_filters_use_correct_units(
@@ -414,6 +461,19 @@ def test_discovery_request_rejects_invalid_sources_and_salary() -> None:
             query="Python",
             salary_min_k=20,
             daily_salary_min_yuan=200,
+        )
+    with pytest.raises(ValueError, match="require smart expansion"):
+        JobSearchPreference(
+            candidate_id="C001",
+            query="Python",
+            expanded_queries=("后端开发",),
+        )
+    with pytest.raises(ValueError, match="must differ"):
+        JobSearchPreference(
+            candidate_id="C001",
+            query="Python",
+            smart_expand=True,
+            expanded_queries=("python",),
         )
 
 

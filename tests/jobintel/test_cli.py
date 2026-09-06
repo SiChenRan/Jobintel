@@ -27,11 +27,13 @@ from jobintel.models import (
 from jobintel.notifications.models import CandidateEmailPreference
 from jobintel.outreach.service import OUTREACH_SUBMIT_TOOL
 from jobintel.persistence.db import JobIntelDatabase
+from jobintel.persistence.migrations import MigrationRunner
 from jobintel.persistence.repository import SQLiteJobRepository
 from jobintel.persistence.seed import seed_database
 from jobintel.providers.base import ToolCall, TurnResult, Usage
 from jobintel.services.evidence_search import EvidenceSearchService
 from jobintel.services.jd_parser import PARSER_SUBMIT_TOOL, raw_job_id
+from jobintel.web.auth import AuthenticationError, WebAuthStore
 
 runner = CliRunner()
 _USAGE = Usage(input_tokens=10, output_tokens=5)
@@ -572,7 +574,38 @@ def test_web_command_defaults_local_and_rejects_unacknowledged_remote_bind(
     assert local.exit_code == 0, local.stdout
     assert calls == [("127.0.0.1", 8123)]
     assert remote.exit_code == 1
-    assert "没有内置登录保护" in remote.stdout
+    assert "已启用登录保护" in remote.stdout
+    assert "远程明文 HTTP 仍不安全" in remote.stdout
+
+
+def test_account_command_resets_password_and_revokes_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "account.db"
+    monkeypatch.setenv("JOBINTEL_DB_PATH", str(db_path))
+    database = JobIntelDatabase.connect(db_path)
+    MigrationRunner(database).migrate()
+    auth = WebAuthStore(database, session_hours=168)
+    initial_session = auth.bootstrap("admin", "initial-password-123")
+    second_session = auth.login("admin", "initial-password-123")
+    assert auth.resolve(second_session.cookie_token) is not None
+    database.close()
+
+    result = runner.invoke(
+        cli.app,
+        ["account", "reset-password", "admin", "--password", "updated-password-456"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "已重置用户 admin 的密码" in result.stdout
+    database = JobIntelDatabase.connect(db_path)
+    auth = WebAuthStore(database, session_hours=168)
+    assert auth.resolve(initial_session.cookie_token) is None
+    assert auth.resolve(second_session.cookie_token) is None
+    with pytest.raises(AuthenticationError, match="用户名或密码错误"):
+        auth.login("admin", "initial-password-123")
+    assert auth.login("admin", "updated-password-456").session.user.username == "admin"
+    database.close()
 
 
 def test_discover_returns_live_ranked_jobs_and_persists(
@@ -598,6 +631,7 @@ def test_discover_returns_live_ranked_jobs_and_persists(
             "上海",
             "--company-size",
             "small",
+            "--smart-expand",
             "--limit",
             "10",
             "--detail-top",
@@ -611,6 +645,11 @@ def test_discover_returns_live_ranked_jobs_and_persists(
     assert payload["discovery"]["total_discovered"] == 1
     assert payload["discovery"]["hits"][0]["job"]["company_name"] == "真实科技"
     assert payload["discovery"]["preference"]["company_sizes"] == ["small"]
+    assert payload["discovery"]["preference"]["smart_expand"] is True
+    assert payload["discovery"]["preference"]["expanded_queries"] == [
+        "后端开发",
+        "服务端开发",
+    ]
     assert payload["discovery"]["source_attempts"][0]["status"] == "success"
     assert payload["discovery"]["detail_attempts"][0]["status"] == "skipped"
     assert payload["analyses"] == []

@@ -1,6 +1,6 @@
 # JobIntel 实现状态与后续规划
 
-> 最后更新：2026-09-05。本文记录当前仓库已经交付的能力和下一阶段开发边界。
+> 最后更新：2026-09-06。本文记录当前仓库已经交付的能力和下一阶段开发边界。
 
 ## 1. 产品目标
 
@@ -22,6 +22,9 @@ JobIntel 面向中文求职者，将真实职位发现、个人经历证据、�
 | M6.5 BOSS Discovery | 完成 | Chrome CDP、真实职位发现、详情抓取、筛选、风险控制 |
 | M6.6 求职档案与雷达 | 完成 | PDF/文本简历导入、确认、发现批次、增量雷达、重新分析 |
 | M6.7 Web 工作台 | 完成 | 本地 FastAPI + 静态前端，覆盖核心候选人工作流 |
+| M6.8 档案驱动职位发现 | 完成 | 候选人搜索画像、技能别名、证据化分项排序、可选受控扩展搜索与 Web 解释 |
+| M6.9 BOSS 混合发现 | 完成 | 首页推荐流、搜索/推荐渠道追踪、候选人历史新鲜度与仅看新岗位 |
+| Web 多用户与权限 | 完成 | 管理员/候选人工作区完全分离、自助注册与自动身份、用户治理、运行配置管理、跨候选人数据隔离、scrypt、服务端会话、CSRF、停用与密码重置 |
 | M8 仓库清理与打包 | 完成 | 独立 JobIntel 包、三家 LLM Provider、公开仓库文档和构建配置 |
 | M9.1 沟通草稿内核 | 完成 | Outreach Domain、稳定 ID、状态机、中文 Prompt、Channel Policy、Evidence Guardrail |
 | M9.2 沟通草稿服务 | 完成 | migration 6、Repository、Provider repair、Finalizer、版本与事件审计、CLI 命令组 |
@@ -31,7 +34,7 @@ JobIntel 面向中文求职者，将真实职位发现、个人经历证据、�
 ## 3. 当前架构
 
 ```text
-CLI / Web / FastMCP
+CLI / Authenticated Web / FastMCP
         │
         ▼
 Application Services ───────── Discovery Service
@@ -59,6 +62,8 @@ Application Services ───────── Discovery Service
 - 正向匹配结论必须引用当前候选人版本且支持该 Requirement 的 Evidence；
 - BOSS 访问必须保留串行详情请求、随机等待、缓存和雷达冷却；
 - `.env`、本地数据库、简历预览和 Chrome Profile 不进入版本控制。
+- 管理员拥有全局项目视图并管理注册用户；候选人自行注册并获得服务端生成的候选人 ID，只允许访问该 ID 下的数据，所有直接和间接资源访问都在后端校验。
+- 管理员不能调用候选人业务 API；候选人不能调用管理员 API。管理员只管理用户、账户安全和项目运行环境。
 
 ## 4. 当前发布门禁
 

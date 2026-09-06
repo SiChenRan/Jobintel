@@ -10,6 +10,8 @@ from jobintel.discovery.connectors.boss import BossConnector
 from jobintel.discovery.models import (
     CompanySize,
     DetailFetchStatus,
+    DiscoveryChannel,
+    DiscoveryMode,
     EmploymentType,
     JobSearchPreference,
     JobSource,
@@ -140,10 +142,129 @@ def test_boss_connector_adds_internship_to_source_query() -> None:
     assert cdp.closed is True
 
 
+def test_boss_connector_runs_expanded_queries_serially_with_delay() -> None:
+    class ExpandedCDP(FakeCDP):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.request_index = 0
+
+        def evaluate(self, expression: str, session_id: str) -> object:
+            if expression == "document.readyState":
+                return "complete"
+            self.expressions.append(expression)
+            self.request_index += 1
+            return json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "external_id": f"expanded-{self.request_index}",
+                            "title": "Agent开发实习",
+                            "company_name": f"公司{self.request_index}",
+                            "location": "北京",
+                            "description": "Python Agent",
+                            "url": (
+                                "https://www.zhipin.com/job_detail/"
+                                f"expanded-{self.request_index}.html"
+                            ),
+                        }
+                    ]
+                }
+            )
+
+    cdp = ExpandedCDP()
+    delays: list[float] = []
+    preference = _preference().model_copy(
+        update={
+            "query": "Agent开发",
+            "city": "北京",
+            "employment_types": (EmploymentType.INTERNSHIP,),
+            "smart_expand": True,
+            "expanded_queries": ("AI Agent", "大模型应用开发"),
+        }
+    )
+
+    results = BossConnector(
+        session_factory=lambda _port: cdp,
+        search_min_delay_seconds=1.5,
+        search_max_delay_seconds=1.5,
+        sleeper=delays.append,
+        jitter=lambda low, _high: low,
+    ).search(preference, limit=30)
+
+    assert len(results) == 3
+    assert len(cdp.expressions) == 3
+    assert delays == [1.5, 1.5]
+    assert "Agent%E5%BC%80%E5%8F%91+%E5%AE%9E%E4%B9%A0" in cdp.expressions[0]
+    assert "AI+Agent+%E5%AE%9E%E4%B9%A0" in cdp.expressions[1]
+    assert "%E5%A4%A7%E6%A8%A1%E5%9E%8B%E5%BA%94%E7%94%A8%E5%BC%80%E5%8F%91" in cdp.expressions[2]
+
+
 def test_boss_connector_reports_missing_login() -> None:
     cdp = FakeCDP({"error": "authentication_required", "status": 401})
     with pytest.raises(AuthenticationRequiredError, match="登录"):
         BossConnector(session_factory=lambda _port: cdp).search(_preference(), limit=10)
+    assert cdp.closed is True
+
+
+def test_boss_connector_hybrid_merges_search_and_recommendation_channels() -> None:
+    class HybridCDP(FakeCDP):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.navigated: list[str] = []
+
+        def send(
+            self,
+            method: str,
+            params: dict[str, Any] | None = None,
+            session_id: str | None = None,
+        ) -> dict[str, Any]:
+            if method == "Page.navigate" and params:
+                self.navigated.append(str(params["url"]))
+            return super().send(method, params, session_id)
+
+        def evaluate(self, expression: str, session_id: str) -> object:
+            if expression == "document.readyState":
+                return "complete"
+            if expression.startswith("window.scrollBy"):
+                return 800
+            channel = "recommendation" if "document.querySelectorAll" in expression else "search"
+            jobs = [
+                {
+                    "external_id": "shared",
+                    "title": "Agent 开发实习",
+                    "company_name": "共同公司",
+                    "location": "北京",
+                    "description": "Python LangChain",
+                    "url": "https://www.zhipin.com/job_detail/shared.html",
+                },
+                {
+                    "external_id": f"{channel}-only",
+                    "title": f"{channel} Agent 工程师",
+                    "company_name": f"{channel} 公司",
+                    "location": "北京",
+                    "description": "Python",
+                    "url": f"https://www.zhipin.com/job_detail/{channel}-only.html",
+                },
+            ]
+            return json.dumps({"jobs": jobs})
+
+    cdp = HybridCDP()
+    preference = _preference().model_copy(update={"discovery_mode": DiscoveryMode.HYBRID})
+    results = BossConnector(
+        session_factory=lambda _port: cdp,
+        search_min_delay_seconds=0,
+        search_max_delay_seconds=0,
+        sleeper=lambda _seconds: None,
+    ).search(preference, limit=10)
+
+    assert len(results) == 3
+    shared = next(item for item in results if item.external_id == "shared")
+    assert shared.acquisition_channels == (
+        DiscoveryChannel.RECOMMENDATION,
+        DiscoveryChannel.SEARCH,
+    )
+    assert any(url.endswith("/web/geek/job") for url in cdp.navigated)
+    assert any(url.endswith("/web/geek/job-recommend") for url in cdp.navigated)
     assert cdp.closed is True
 
 

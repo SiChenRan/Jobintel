@@ -59,6 +59,8 @@ class JobIntelSettings(BaseSettings):
     discovery_detail_max_delay_seconds: float = Field(default=6.0, ge=2.0, le=60)
     discovery_detail_cache_hours: int = Field(default=24, ge=1, le=168)
     radar_min_interval_hours: int = Field(default=6, ge=1, le=168)
+    web_session_hours: int = Field(default=168, ge=1, le=720)
+    web_cookie_secure: bool = False
 
     @model_validator(mode="after")
     def valid_discovery_delay_ranges(self) -> JobIntelSettings:

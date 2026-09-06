@@ -9,35 +9,54 @@
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" aria-label="侧边导航">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">JI</div>
+        <div class="brand-mark" aria-hidden="true"><span>J</span></div>
         <div><strong>JobIntel</strong><span>求职情报工作台</span></div>
       </div>
+      <p class="nav-label" data-role="candidate">求职空间</p>
       <nav class="nav" aria-label="主要导航">
-        <button class="nav-item active" data-view="dashboard"><span>⌂</span>工作台</button>
-        <button class="nav-item" data-view="profiles"><span>◎</span>候选人档案</button>
-        <button class="nav-item" data-view="discovery"><span>⌕</span>发现职位</button>
-        <button class="nav-item" data-view="analyses"><span>◇</span>深入分析</button>
-        <button class="nav-item" data-view="radar"><span>◉</span>职位雷达</button>
+        <button class="nav-item active" data-view="dashboard" data-role="candidate"><span class="nav-icon">⌂</span><span>工作台</span></button>
+        <button class="nav-item" data-view="profiles" data-role="candidate"><span class="nav-icon">▤</span><span>我的档案</span></button>
+        <button class="nav-item" data-view="discovery" data-role="candidate"><span class="nav-icon">⌕</span><span>发现职位</span></button>
+        <button class="nav-item" data-view="analyses" data-role="candidate"><span class="nav-icon">◇</span><span>深入分析</span></button>
+        <button class="nav-item" data-view="radar" data-role="candidate"><span class="nav-icon">◉</span><span>职位雷达</span></button>
       </nav>
-      <div class="sidebar-note">
+      <p class="nav-label" data-role="admin">平台管理</p>
+      <nav class="nav" aria-label="管理员导航" data-role="admin">
+        <button class="nav-item active" data-view="admin-users"><span class="nav-icon">♙</span><span>用户管理</span></button>
+        <button class="nav-item" data-view="admin-environment"><span class="nav-icon">⚙</span><span>系统配置</span></button>
+      </nav>
+      <p class="nav-label nav-label-spaced">个人</p>
+      <nav class="nav" aria-label="个人导航">
+        <button class="nav-item" data-view="account"><span class="nav-icon">◌</span><span>账户设置</span></button>
+      </nav>
+      <div class="sidebar-note" data-role="candidate">
         <span class="status-dot" id="browser-dot"></span>
         <div><strong id="browser-status">正在检查浏览器</strong><small>BOSS 本地连接</small></div>
+      </div>
+      <div class="sidebar-user">
+        <span class="sidebar-avatar" id="sidebar-avatar">U</span>
+        <div><strong id="sidebar-user-name">正在加载</strong><small id="sidebar-user-role">账户</small></div>
       </div>
     </aside>
 
     <main class="main">
       <header class="topbar">
         <button id="menu-button" class="icon-button" aria-label="打开导航">☰</button>
-        <div><p class="eyebrow" id="view-eyebrow">概览</p><h1 id="view-title">求职工作台</h1></div>
-        <div class="top-actions"><span class="provider-pill">模型 <b id="provider-name">—</b></span><button class="button secondary" id="refresh-button">刷新</button></div>
+        <div class="page-heading"><p class="breadcrumb"><span>JobIntel</span><i>/</i><b id="view-eyebrow">概览</b></p><h1 id="view-title">求职工作台</h1></div>
+        <div class="top-actions">
+          <span class="provider-pill" data-role="candidate"><i></i>智能分析 <b id="provider-name">—</b></span>
+          <button class="top-icon-button" id="refresh-button" title="刷新当前数据" aria-label="刷新当前数据">↻</button>
+          <div class="top-user"><span class="top-avatar" id="top-avatar">U</span><div><strong id="current-user">—</strong><small id="current-role">—</small></div></div>
+          <button class="top-icon-button logout-icon" id="logout-button" title="退出登录" aria-label="退出登录">↗</button>
+        </div>
       </header>
 
-      <section class="view active" id="view-dashboard">
+      <section class="view active" id="view-dashboard" data-role="candidate">
         <div class="hero">
-          <div><p class="eyebrow">今日重点</p><h2>从真实职位开始，做有证据的选择。</h2><p>完善档案、发现职位、深入分析并持续追踪。</p></div>
-          <button class="button primary large" data-go="discovery">开始找职位 <span>→</span></button>
+          <div class="hero-copy"><span class="hero-kicker"><i></i>求职行动中心</span><h2>把每一次投递，<br>变成有依据的选择。</h2><p>从真实岗位发现，到能力匹配分析与 HR 沟通，形成属于你的求职闭环。</p><div class="hero-actions"><button class="button hero-primary large" data-go="discovery">开始发现职位 <span>→</span></button><button class="button hero-secondary large" data-go="profiles">更新我的档案</button></div></div>
+          <div class="hero-visual" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="hero-score"><small>岗位匹配</small><strong>86</strong><span>技能证据充分</span></div><div class="hero-chip chip-one">真实职位</div><div class="hero-chip chip-two">证据分析</div></div>
         </div>
         <div class="metric-grid" id="metrics"></div>
         <div class="dashboard-grid">
@@ -57,17 +76,17 @@
         </div>
       </section>
 
-      <section class="view" id="view-profiles">
-        <div class="section-intro"><div><p class="eyebrow">候选人证据</p><h2>候选人档案</h2><p>从简历提取可用于岗位分析的经历与技能。</p></div></div>
+      <section class="view" id="view-profiles" data-role="candidate">
+        <div class="section-intro"><div><p class="eyebrow">候选人证据</p><h2>我的候选人档案</h2><p>上传新简历并确认后，会保存为新的档案版本，历史分析仍可追溯。</p></div></div>
         <div class="two-column">
           <article class="panel form-panel">
             <div class="panel-heading"><div><span class="step-tag">第一步</span><h3>上传并解析简历</h3></div></div>
             <form id="profile-form">
-              <label>候选人 ID<input name="candidate_id" required placeholder="例如 C001"></label>
+              <label>候选人编号<input name="candidate_id" required readonly></label>
               <label>简历文件<input name="resume" required type="file" accept=".pdf,.txt,.md,.markdown"></label>
               <label>分析模型<select name="provider"><option value="">使用系统默认</option><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select></label>
               <p class="field-help">支持文本型 PDF、TXT、Markdown，最大 10 MiB。扫描 PDF 请先 OCR。</p>
-              <button class="button primary full" type="submit">生成档案预览</button>
+              <button class="button primary full" type="submit">上传简历并生成新版本预览</button>
             </form>
           </article>
           <article class="panel preview-panel">
@@ -89,13 +108,14 @@
         <article class="panel history-panel"><div class="panel-heading"><div><p class="eyebrow">档案记录</p><h3>当前档案</h3></div></div><div id="profile-list" class="card-list"></div></article>
       </section>
 
-      <section class="view" id="view-discovery">
+      <section class="view" id="view-discovery" data-role="candidate">
         <div class="section-intro"><div><p class="eyebrow">BOSS 职位</p><h2>发现真实职位</h2><p>搜索 BOSS 职位并按候选人匹配度排序。</p></div></div>
         <article class="panel search-panel">
           <form id="discovery-form">
             <div class="form-grid primary-fields">
               <label>候选人<select name="candidate_id" id="candidate-select" required></select></label>
               <label class="wide">职位关键词<input name="query" required value="Agent开发" placeholder="例如 Agent开发"></label>
+              <label>采集模式<select name="discovery_mode"><option value="hybrid" selected>混合发现</option><option value="search">关键词搜索</option><option value="recommendation">首页推荐</option></select></label>
               <label>城市<input name="city" value="北京" placeholder="北京"></label>
               <label>职位类型<select name="employment_type"><option value="">不限</option><option value="internship" selected>实习</option><option value="full_time">全职</option><option value="part_time">兼职</option><option value="other">其他/未知</option></select></label>
               <label>公司规模<select name="company_size"><option value="">不限</option><option value="micro">0-20 人</option><option value="small">20-99 人</option><option value="medium">100-499 人</option><option value="large">500-999 人</option><option value="very_large">1000-9999 人</option><option value="enterprise">10000 人以上</option></select></label>
@@ -117,22 +137,25 @@
                 <label><input type="checkbox" name="exclude_outsourcing">排除外包/驻场</label>
                 <label><input type="checkbox" name="exclude_training">排除培训机构</label>
                 <label><input type="checkbox" name="exclude_agency">排除中介/猎头</label>
+                <label><input type="checkbox" name="smart_expand">根据档案扩展搜索</label>
                 <label><input type="checkbox" name="strict_salary">排除薪资面议</label>
+                <label><input type="checkbox" name="prefer_new" checked>优先展示新岗位</label>
+                <label><input type="checkbox" name="only_new">仅显示未见岗位</label>
               </div>
             </details>
-            <div class="form-actions"><p><span class="safe-dot"></span>详情补全上限 10 条</p><button class="button primary" type="submit">搜索 BOSS 职位 <span>→</span></button></div>
+            <div class="form-actions"><p><span class="safe-dot"></span>推荐流最多读取 3 轮，详情补全上限 10 条</p><button class="button primary" type="submit">发现 BOSS 职位 <span>→</span></button></div>
           </form>
         </article>
         <div id="discovery-result" class="results-wrap"><div class="empty-state tall"><span class="empty-icon">⌕</span><strong>设置条件，开始搜索</strong><p>结果会按候选人证据和职位关键词确定性排序。</p></div></div>
         <article class="panel discovery-history-panel"><div class="panel-heading"><div><p class="eyebrow">历史结果</p><h3>最近搜索批次</h3><p>打开已保存的搜索快照，不会再次访问 BOSS。</p></div></div><div id="discovery-history" class="compact-list"></div></article>
       </section>
 
-      <section class="view" id="view-analyses">
+      <section class="view" id="view-analyses" data-role="candidate">
         <div class="section-intro"><div><p class="eyebrow">岗位匹配</p><h2>深入分析</h2><p>查看岗位匹配、证据、差距和沟通草稿。</p></div><button class="button secondary" id="reload-analyses">刷新列表</button></div>
         <div id="analysis-list" class="analysis-grid"></div>
       </section>
 
-      <section class="view" id="view-radar">
+      <section class="view" id="view-radar" data-role="candidate">
         <div class="section-intro"><div><p class="eyebrow">增量追踪</p><h2>职位雷达</h2><p>根据历史搜索检查新增、变化和疑似下线职位。</p></div></div>
         <div class="two-column radar-layout">
           <article class="panel form-panel">
@@ -148,11 +171,98 @@
         </div>
         <div id="radar-result"></div>
       </section>
+
+      <section class="view" id="view-account">
+        <div class="section-intro"><div><p class="eyebrow">个人中心</p><h2>账户设置</h2><p>维护个人资料、登录凭据与账户安全。</p></div></div>
+        <div class="two-column account-layout">
+          <article class="panel account-summary-panel">
+            <div class="panel-heading"><div><span class="panel-icon">◎</span><h3>基本资料</h3><p>用户名和系统身份由平台统一管理。</p></div></div>
+            <div class="account-summary" id="account-summary"></div>
+            <form id="account-profile-form" class="account-profile-form">
+              <label>姓名<input name="display_name" minlength="1" maxlength="80" autocomplete="name" required></label>
+              <label>联系邮箱<input name="email" type="email" maxlength="320" autocomplete="email" required></label>
+              <button class="button primary full" type="submit">保存个人资料</button>
+            </form>
+          </article>
+          <article class="panel form-panel security-panel">
+            <div class="panel-heading"><div><span class="panel-icon amber">⌾</span><h3>登录安全</h3><p>更新密码后，其他设备上的登录会话会立即失效。</p></div></div>
+            <form id="change-password-form">
+              <label>当前密码<input name="current_password" type="password" minlength="10" maxlength="128" autocomplete="current-password" required></label>
+              <label>新密码<input name="new_password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+              <label>确认新密码<input name="confirm_password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+              <div class="password-tip"><span>安全建议</span>密码至少 10 位，建议包含字母、数字和符号。</div>
+              <button class="button secondary full" type="submit">更新登录密码</button>
+            </form>
+          </article>
+        </div>
+      </section>
+
+      <section class="view admin-view" id="view-admin-users" data-role="admin">
+        <div id="admin-user-panel">
+          <div class="section-intro"><div><p class="eyebrow">平台运营</p><h2>用户管理</h2><p>查看平台注册情况，维护候选人账户资料、状态和访问安全。</p></div><button class="button primary" id="admin-users-refresh" type="button">刷新用户</button></div>
+          <div class="admin-metrics" id="admin-metrics">
+            <article><span class="metric-icon violet">♙</span><div><small>注册用户</small><strong>—</strong></div></article>
+            <article><span class="metric-icon green">✓</span><div><small>正常候选人</small><strong>—</strong></div></article>
+            <article><span class="metric-icon orange">!</span><div><small>停用账户</small><strong>—</strong></div></article>
+            <article><span class="metric-icon blue">▤</span><div><small>已建档案</small><strong>—</strong></div></article>
+          </div>
+          <article class="panel user-management-panel">
+            <div class="panel-heading user-list-heading"><div><p class="eyebrow">账户目录</p><h3>全部注册用户</h3><p id="admin-user-summary">正在统计注册用户…</p></div><div class="table-tools"><label class="search-box"><span>⌕</span><input id="admin-user-search" type="search" autocomplete="off" placeholder="搜索姓名、用户名或邮箱" aria-label="搜索用户"></label></div></div>
+            <div id="admin-user-list" class="user-list"><div class="empty-state">正在读取用户…</div></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view admin-view" id="view-admin-environment" data-role="admin">
+          <div class="section-intro"><div><p class="eyebrow">系统中心</p><h2>运行配置</h2><p>管理智能分析、邮件通知和职位采集服务的运行参数。</p></div><div class="config-health"><i></i><span>配置修改将实时应用</span></div></div>
+          <form id="environment-form" class="environment-grid">
+            <article class="panel form-panel config-card config-card-model">
+              <div class="panel-heading config-heading"><div class="config-title"><span class="config-icon violet">✦</span><div><h3>智能分析模型</h3><p>配置简历解析、岗位分析与沟通文案模型。</p></div></div><span class="config-state" id="llm-config-badge">检查中</span></div>
+              <label>默认模型服务<select name="llm_provider"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select></label>
+              <label>DeepSeek 模型<input name="deepseek_model" required></label>
+              <label>DeepSeek API 地址<input name="deepseek_base_url" type="url" required></label>
+              <label>DeepSeek API Key<input name="deepseek_api_key" type="password" autocomplete="new-password" placeholder="留空则不修改"></label>
+              <label>OpenAI 模型<input name="openai_model" required></label>
+              <label>OpenAI API Key<input name="openai_api_key" type="password" autocomplete="new-password" placeholder="留空则不修改"></label>
+              <label>Anthropic 模型<input name="anthropic_model" required></label>
+              <label>Anthropic API Key<input name="anthropic_api_key" type="password" autocomplete="new-password" placeholder="留空则不修改"></label>
+              <p class="field-help" id="llm-config-status"></p>
+            </article>
+
+            <article class="panel form-panel config-card">
+              <div class="panel-heading config-heading"><div class="config-title"><span class="config-icon blue">✉</span><div><h3>邮件通知</h3><p>统一配置职位结果通知的发件服务。</p></div></div><span class="config-state" id="smtp-config-badge">检查中</span></div>
+              <label>SMTP 主机<input name="smtp_host" placeholder="smtp.qq.com"></label>
+              <label>SMTP 端口<input name="smtp_port" type="number" min="1" max="65535" required></label>
+              <label>连接方式<select name="smtp_transport"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option><option value="plain">明文</option></select></label>
+              <label>SMTP 用户名<input name="smtp_username" autocomplete="username"></label>
+              <label>SMTP 授权码<input name="smtp_password" type="password" autocomplete="new-password" placeholder="留空则不修改"></label>
+              <label>发件邮箱<input name="smtp_from_address" type="email"></label>
+              <label>超时秒数<input name="smtp_timeout_seconds" type="number" min="1" max="120" step="0.1" required></label>
+              <p class="field-help" id="smtp-config-status"></p>
+            </article>
+
+            <article class="panel form-panel config-card">
+              <div class="panel-heading config-heading"><div class="config-title"><span class="config-icon orange">⌁</span><div><h3>BOSS 数据连接</h3><p>控制浏览器连接、访问频率与缓存策略。</p></div></div><span class="config-state" id="boss-config-badge">检查中</span></div>
+              <label>Chrome CDP 端口<input name="discovery_cdp_port" type="number" min="1" max="65535" required></label>
+              <label>搜索最小间隔（秒）<input name="discovery_search_min_delay_seconds" type="number" min="1" max="30" step="0.1" required></label>
+              <label>搜索最大间隔（秒）<input name="discovery_search_max_delay_seconds" type="number" min="1" max="30" step="0.1" required></label>
+              <label>详情最小间隔（秒）<input name="discovery_detail_min_delay_seconds" type="number" min="2" max="60" step="0.1" required></label>
+              <label>详情最大间隔（秒）<input name="discovery_detail_max_delay_seconds" type="number" min="2" max="60" step="0.1" required></label>
+              <label>详情缓存时间（小时）<input name="discovery_detail_cache_hours" type="number" min="1" max="168" required></label>
+              <label>雷达最小间隔（小时）<input name="radar_min_interval_hours" type="number" min="1" max="168" required></label>
+              <p class="field-help" id="boss-config-status"></p>
+            </article>
+            <div class="environment-actions"><div><strong>保存前请确认配置</strong><span>错误的连接参数可能导致职位采集或邮件通知暂时不可用。</span></div><button class="button primary large" type="submit">保存并应用配置</button></div>
+          </form>
+      </section>
     </main>
   </div>
 
   <dialog id="detail-dialog"><button class="dialog-close" aria-label="关闭">×</button><div id="dialog-content"></div></dialog>
-  <div class="loading" id="loading" aria-live="polite"><div class="loader"></div><strong id="loading-text">正在处理…</strong></div>
+  <div class="loading" id="loading" aria-live="polite">
+    <div class="loader"></div>
+    <div><span>后台任务 <b id="loading-count">1</b></span><strong id="loading-text">正在处理…</strong></div>
+  </div>
   <div class="toast" id="toast" role="status"></div>
   <script src="/static/app.js" defer></script>
 </body>

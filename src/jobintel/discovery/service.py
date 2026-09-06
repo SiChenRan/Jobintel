@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
-import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
@@ -38,7 +36,11 @@ from jobintel.discovery.models import (
     parse_salary_k,
     utc_now,
 )
-from jobintel.models import CandidateProfile
+from jobintel.discovery.profile_matching import (
+    CandidateSearchProfile,
+    build_candidate_search_profile,
+    rank_for_profile,
+)
 from jobintel.persistence.repository import SQLiteJobRepository
 
 
@@ -73,7 +75,27 @@ class JobDiscoveryService:
         profile = self._repository.get_candidate_profile(
             preference.candidate_id, preference.profile_version
         )
-        resolved = preference.model_copy(update={"profile_version": profile.profile_version})
+        search_profile = build_candidate_search_profile(
+            profile,
+            query=preference.query,
+            smart_expand=preference.smart_expand,
+        )
+        expanded_queries = preference.expanded_queries or search_profile.snapshot.expansion_queries
+        if expanded_queries != search_profile.snapshot.expansion_queries:
+            search_profile = CandidateSearchProfile(
+                snapshot=search_profile.snapshot.model_copy(
+                    update={"expansion_queries": expanded_queries}
+                ),
+                skills=search_profile.skills,
+                evidence=search_profile.evidence,
+                education_text=search_profile.education_text,
+            )
+        resolved = preference.model_copy(
+            update={
+                "profile_version": profile.profile_version,
+                "expanded_queries": expanded_queries,
+            }
+        )
         per_source_limit = (
             min(200, max(30, resolved.limit))
             if len(resolved.sources) == 1
@@ -134,11 +156,25 @@ class JobDiscoveryService:
         raw = [
             listing for source in resolved.sources for listing in listings_by_source.get(source, ())
         ]
+        seen_job_ids = set(
+            self._repository.list_candidate_seen_discovery_job_ids(resolved.candidate_id)
+        )
         canonical = self._deduplicate(raw)
         eligible = [job for job in canonical if self._eligible(job, resolved)]
+        if resolved.only_new:
+            eligible = [job for job in eligible if job.discovery_job_id not in seen_job_ids]
         hits = sorted(
-            (self._rank(job, resolved, profile) for job in eligible),
+            (
+                self._rank(
+                    job,
+                    resolved,
+                    search_profile,
+                    is_new_to_candidate=job.discovery_job_id not in seen_job_ids,
+                )
+                for job in eligible
+            ),
             key=lambda hit: (
+                0 if resolved.prefer_new and hit.is_new_to_candidate else 1,
                 -hit.rank_score,
                 hit.job.company_name.casefold(),
                 hit.job.title.casefold(),
@@ -151,8 +187,17 @@ class JobDiscoveryService:
             detail_cache_hours=detail_cache_hours,
         )
         hits = sorted(
-            (self._rank(hit.job, resolved, profile) for hit in enriched_hits),
+            (
+                self._rank(
+                    hit.job,
+                    resolved,
+                    search_profile,
+                    is_new_to_candidate=hit.job.discovery_job_id not in seen_job_ids,
+                )
+                for hit in enriched_hits
+            ),
             key=lambda hit: (
+                0 if resolved.prefer_new and hit.is_new_to_candidate else 1,
                 -hit.rank_score,
                 hit.job.company_name.casefold(),
                 hit.job.title.casefold(),
@@ -168,6 +213,7 @@ class JobDiscoveryService:
             total_discovered=len(raw),
             duplicates_removed=len(raw) - len(canonical),
             filtered_out=len(canonical) - len(eligible),
+            profile_snapshot=search_profile.snapshot,
             created_at=utc_now(),
         )
         return self._repository.save_discovery_run(run) if persist else run
@@ -408,6 +454,13 @@ class JobDiscoveryService:
                     education=richest.education,
                     published_text=richest.published_text,
                     source_links=links,
+                    acquisition_channels=tuple(
+                        dict.fromkeys(
+                            channel
+                            for item in items
+                            for channel in item.acquisition_channels
+                        )
+                    ),
                     first_seen_at=now,
                     last_seen_at=now,
                 )
@@ -477,50 +530,23 @@ class JobDiscoveryService:
     def _rank(
         job: DiscoveredJob,
         preference: JobSearchPreference,
-        profile: CandidateProfile,
+        profile: CandidateSearchProfile,
+        *,
+        is_new_to_candidate: bool = True,
     ) -> DiscoveryHit:
-        title = _normalize(job.title)
-        haystack = _normalize(" ".join((job.title, job.description, job.experience, job.education)))
-        query_terms = _terms(preference.query)
-        profile_terms = {
-            normalized
-            for evidence in profile.evidence
-            for skill in evidence.skills
-            if (normalized := _normalize(skill))
-        }
-        matched_query = {term for term in query_terms if term in title}
-        matched_profile = {term for term in profile_terms if term in haystack}
-
-        if _normalize(preference.query) in title:
-            role_score = 50
-        elif query_terms:
-            role_score = round(45 * len(matched_query) / len(query_terms))
-        else:
-            role_score = 0
-        skill_score = min(35, len(matched_profile) * 7)
-        location_score = 5 if preference.city and preference.city in job.location else 0
-        detail_score = 5 if len(job.description) >= 30 else 2 if job.description else 0
-        salary_score = (
-            5 if job.salary_min_k is not None or job.salary_daily_min_yuan is not None else 0
-        )
+        ranked = rank_for_profile(job, preference, profile)
         return DiscoveryHit(
             job=job,
-            rank_score=min(
-                100,
-                role_score + skill_score + location_score + detail_score + salary_score,
+            rank_score=ranked.breakdown.total,
+            matched_terms=tuple(
+                sorted(
+                    set(ranked.matched_query_terms) | set(ranked.matched_profile_skills),
+                    key=str.casefold,
+                )
             ),
-            matched_terms=tuple(sorted(matched_query | matched_profile)),
+            matched_query_terms=ranked.matched_query_terms,
+            matched_profile_skills=ranked.matched_profile_skills,
+            matched_evidence=ranked.matched_evidence,
+            rank_breakdown=ranked.breakdown,
+            is_new_to_candidate=is_new_to_candidate,
         )
-
-
-def _normalize(value: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
-
-
-def _terms(value: str) -> set[str]:
-    normalized = _normalize(value)
-    terms = set(re.findall(r"[a-z0-9+#.]{2,}|[\u4e00-\u9fff]{2,}", normalized))
-    for chunk in tuple(terms):
-        if re.fullmatch(r"[\u4e00-\u9fff]{3,}", chunk):
-            terms.update(chunk[index : index + 2] for index in range(len(chunk) - 1))
-    return terms

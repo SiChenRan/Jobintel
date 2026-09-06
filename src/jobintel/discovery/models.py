@@ -13,13 +13,28 @@ from pydantic import Field, HttpUrl, field_validator, model_validator
 
 from jobintel.models import FrozenDomainModel, NonEmptyStr, UtcDateTime
 
-DISCOVERY_SCHEMA_VERSION = "jobintel-discovery-v4"
+DISCOVERY_SCHEMA_VERSION = "jobintel-discovery-v6"
 
 
 class JobSource(StrEnum):
     """Maintained third-party job sources."""
 
     BOSS = "boss"
+
+
+class DiscoveryMode(StrEnum):
+    """Candidate-selected acquisition strategy within one job source."""
+
+    SEARCH = "search"
+    RECOMMENDATION = "recommendation"
+    HYBRID = "hybrid"
+
+
+class DiscoveryChannel(StrEnum):
+    """Traceable surface on which a source exposed a listing."""
+
+    SEARCH = "search"
+    RECOMMENDATION = "recommendation"
 
 
 class SourceStatus(StrEnum):
@@ -91,6 +106,11 @@ class JobSearchPreference(FrozenDomainModel):
     education_requirements: tuple[NonEmptyStr, ...] = ()
     experience_requirements: tuple[NonEmptyStr, ...] = ()
     exclusions: tuple[NonEmptyStr, ...] = ()
+    smart_expand: bool = False
+    expanded_queries: tuple[NonEmptyStr, ...] = Field(default=(), max_length=2)
+    discovery_mode: DiscoveryMode = DiscoveryMode.SEARCH
+    prefer_new: bool = True
+    only_new: bool = False
     sources: tuple[JobSource, ...] = (JobSource.BOSS,)
     limit: int = Field(default=100, ge=1, le=500)
 
@@ -124,6 +144,15 @@ class JobSearchPreference(FrozenDomainModel):
             raise ValueError("unknown company size cannot be used as a filter")
         return values
 
+    @field_validator("expanded_queries")
+    @classmethod
+    def unique_expanded_queries(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        """Keep program-generated supplemental searches bounded and unique."""
+        normalized = tuple(_canonical_text(value) for value in values)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("expanded queries must be unique")
+        return values
+
     @model_validator(mode="after")
     def valid_salary_range(self) -> JobSearchPreference:
         """Reject inverted or mixed-unit salary constraints."""
@@ -143,6 +172,12 @@ class JobSearchPreference(FrozenDomainModel):
         daily = self.daily_salary_min_yuan is not None or self.daily_salary_max_yuan is not None
         if monthly and daily:
             raise ValueError("monthly and daily salary filters cannot be mixed")
+        if self.expanded_queries and not self.smart_expand:
+            raise ValueError("expanded queries require smart expansion")
+        if _canonical_text(self.query) in {
+            _canonical_text(value) for value in self.expanded_queries
+        }:
+            raise ValueError("expanded queries must differ from the primary query")
         return self
 
 
@@ -162,6 +197,19 @@ class RawJobListing(FrozenDomainModel):
     company_size: CompanySize = CompanySize.UNKNOWN
     url: HttpUrl
     published_text: str = ""
+    acquisition_channels: tuple[DiscoveryChannel, ...] = Field(
+        default=(DiscoveryChannel.SEARCH,), min_length=1
+    )
+
+    @field_validator("acquisition_channels")
+    @classmethod
+    def unique_acquisition_channels(
+        cls, values: tuple[DiscoveryChannel, ...]
+    ) -> tuple[DiscoveryChannel, ...]:
+        """Keep a listing's discovery surfaces non-empty and unique."""
+        if len(values) != len(set(values)):
+            raise ValueError("acquisition channels must be unique")
+        return values
 
 
 class JobSourceLink(FrozenDomainModel):
@@ -239,6 +287,9 @@ class DiscoveredJob(FrozenDomainModel):
     detail_fetched_at: UtcDateTime | None = None
     detail_content_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_links: tuple[JobSourceLink, ...] = Field(min_length=1)
+    acquisition_channels: tuple[DiscoveryChannel, ...] = Field(
+        default=(DiscoveryChannel.SEARCH,), min_length=1
+    )
     first_seen_at: UtcDateTime
     last_seen_at: UtcDateTime
 
@@ -250,6 +301,16 @@ class DiscoveredJob(FrozenDomainModel):
         if len(identities) != len(set(identities)):
             raise ValueError("source links must be unique")
         return links
+
+    @field_validator("acquisition_channels")
+    @classmethod
+    def unique_job_acquisition_channels(
+        cls, values: tuple[DiscoveryChannel, ...]
+    ) -> tuple[DiscoveryChannel, ...]:
+        """Keep all surfaces contributing to a canonical job traceable."""
+        if len(values) != len(set(values)):
+            raise ValueError("acquisition channels must be unique")
+        return values
 
     @field_validator("skills")
     @classmethod
@@ -267,12 +328,91 @@ class DiscoveredJob(FrozenDomainModel):
         return self
 
 
+class SearchProfileSnapshot(FrozenDomainModel):
+    """Compact immutable profile context used by one discovery run."""
+
+    candidate_id: NonEmptyStr
+    profile_version: int = Field(ge=1)
+    evidence_count: int = Field(ge=0)
+    skill_count: int = Field(default=0, ge=0)
+    skills: tuple[NonEmptyStr, ...] = ()
+    expansion_queries: tuple[NonEmptyStr, ...] = Field(default=(), max_length=2)
+
+    @field_validator("skills", "expansion_queries")
+    @classmethod
+    def unique_snapshot_values(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        """Keep displayed profile context deterministic and duplicate-free."""
+        normalized = tuple(_canonical_text(value) for value in values)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("profile snapshot values must be unique")
+        return values
+
+
+class ProfileEvidenceMatch(FrozenDomainModel):
+    """One candidate evidence item that contributed to discovery ranking."""
+
+    evidence_id: NonEmptyStr
+    title: NonEmptyStr
+    matched_terms: tuple[NonEmptyStr, ...] = Field(min_length=1)
+
+    @field_validator("matched_terms")
+    @classmethod
+    def unique_matched_terms(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject duplicate terms within one evidence explanation."""
+        normalized = tuple(_canonical_text(value) for value in values)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("matched evidence terms must be unique")
+        return values
+
+
+class DiscoveryRankBreakdown(FrozenDomainModel):
+    """Explainable deterministic components of one coarse discovery score."""
+
+    target_relevance: int = Field(ge=0, le=40)
+    profile_skills: int = Field(ge=0, le=30)
+    profile_evidence: int = Field(ge=0, le=10)
+    preference_fit: int = Field(ge=0, le=10)
+    information_quality: int = Field(ge=0, le=10)
+    total: int = Field(ge=0, le=100)
+
+    @model_validator(mode="after")
+    def total_matches_components(self) -> DiscoveryRankBreakdown:
+        """Prevent displayed score explanations from drifting from their total."""
+        expected = (
+            self.target_relevance
+            + self.profile_skills
+            + self.profile_evidence
+            + self.preference_fit
+            + self.information_quality
+        )
+        if self.total != expected:
+            raise ValueError("discovery rank total does not match its components")
+        return self
+
+
 class DiscoveryHit(FrozenDomainModel):
-    """A hard-filtered job with deterministic coarse ranking evidence."""
+    """A hard-filtered job with deterministic and explainable ranking evidence."""
 
     job: DiscoveredJob
     rank_score: int = Field(ge=0, le=100)
     matched_terms: tuple[NonEmptyStr, ...] = ()
+    matched_query_terms: tuple[NonEmptyStr, ...] = ()
+    matched_profile_skills: tuple[NonEmptyStr, ...] = ()
+    matched_evidence: tuple[ProfileEvidenceMatch, ...] = ()
+    rank_breakdown: DiscoveryRankBreakdown | None = None
+    is_new_to_candidate: bool = True
+
+    @model_validator(mode="after")
+    def coherent_ranking_explanation(self) -> DiscoveryHit:
+        """Keep the legacy score and the explainable score in agreement."""
+        if self.rank_breakdown is not None and self.rank_breakdown.total != self.rank_score:
+            raise ValueError("rank score does not match discovery rank breakdown")
+        if len(self.matched_profile_skills) != len(set(self.matched_profile_skills)):
+            raise ValueError("matched profile skills must be unique")
+        evidence_ids = tuple(item.evidence_id for item in self.matched_evidence)
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("matched profile evidence must be unique")
+        return self
 
 
 class SourceAttempt(FrozenDomainModel):
@@ -307,6 +447,7 @@ class DiscoveryRun(FrozenDomainModel):
     total_discovered: int = Field(ge=0)
     duplicates_removed: int = Field(ge=0)
     filtered_out: int = Field(ge=0)
+    profile_snapshot: SearchProfileSnapshot | None = None
     created_at: UtcDateTime
     schema_version: NonEmptyStr = DISCOVERY_SCHEMA_VERSION
 
@@ -317,6 +458,11 @@ class DiscoveryRun(FrozenDomainModel):
             raise ValueError("total_discovered does not match source attempts")
         if len(self.source_attempts) != len(self.preference.sources):
             raise ValueError("source attempt count does not match requested sources")
+        if self.profile_snapshot is not None and (
+            self.profile_snapshot.candidate_id != self.preference.candidate_id
+            or self.profile_snapshot.profile_version != self.preference.profile_version
+        ):
+            raise ValueError("profile snapshot does not match discovery preference")
         hit_ids = {hit.job.discovery_job_id for hit in self.hits}
         detail_keys = [
             (attempt.discovery_job_id, attempt.source, attempt.external_id)

@@ -22,6 +22,7 @@ from jobintel.discovery.connectors.cdp import cdp_reachable, setup_chrome
 from jobintel.discovery.connectors.registry import build_connectors
 from jobintel.discovery.models import (
     CompanySize,
+    DiscoveryMode,
     DiscoveryRun,
     EmploymentType,
     JobSearchPreference,
@@ -55,6 +56,7 @@ from jobintel.services.resume_parser import (
     ResumeParserService,
     materialize_profile,
 )
+from jobintel.web.auth import AuthenticationError, WebAuthStore
 
 app = typer.Typer(
     name="jobintel",
@@ -82,6 +84,11 @@ notify_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(notify_app, name="notify")
+account_app = typer.Typer(
+    help="管理 Web 登录账户。",
+    no_args_is_help=True,
+)
+app.add_typer(account_app, name="account")
 
 _EXCLUSION_PRESETS = {
     "outsourcing": ("外包", "驻场"),
@@ -1061,6 +1068,35 @@ def analyze_discovery(
         _render_analysis_batch(console, run, analyses, dry_run=dry_run)
 
 
+@account_app.command("reset-password")
+def reset_web_password(
+    username: str = typer.Argument(..., help="需要重置密码的 Web 用户名。"),
+    password: str = typer.Option(
+        ...,
+        "--password",
+        prompt="新密码",
+        hide_input=True,
+        confirmation_prompt=True,
+        help="新密码长度为 10 到 128 个字符。",
+    ),
+) -> None:
+    """Reset a Web password locally and revoke all existing sessions."""
+    settings = load_jobintel_settings()
+    console = _console()
+    database = JobIntelDatabase.connect(settings.jobintel_db_path)
+    try:
+        MigrationRunner(database).migrate()
+        try:
+            user = WebAuthStore(database, session_hours=settings.web_session_hours).reset_password(
+                username, password
+            )
+        except (AuthenticationError, ValueError) as exc:
+            _abort(console, str(exc), code="WEB_PASSWORD_RESET_FAILED", json_output=False)
+    finally:
+        database.close()
+    console.print(f"[green]已重置用户 {user.username} 的密码; 全部 Web 会话已注销。[/green]")
+
+
 @app.command("serve-mcp")
 def serve_mcp() -> None:
     """Run the six-tool JobIntel FastMCP server over stdio."""
@@ -1076,15 +1112,15 @@ def serve_web(
     allow_remote: bool = typer.Option(
         False,
         "--allow-remote",
-        help="Acknowledge that non-loopback binding has no built-in authentication.",
+        help="Acknowledge that a non-loopback listener should be placed behind HTTPS.",
     ),
 ) -> None:
     """Run the local JobIntel browser workspace."""
     if host not in {"127.0.0.1", "localhost", "::1"} and not allow_remote:
         _abort(
             _console(),
-            "Web 工作台没有内置登录保护。请使用 127.0.0.1 + SSH 端口转发, "
-            "或明确传入 --allow-remote。",
+            "Web 工作台已启用登录保护, 但远程明文 HTTP 仍不安全。请使用 "
+            "127.0.0.1 + SSH 端口转发, 或在 HTTPS 反向代理后传入 --allow-remote。",
             code="REMOTE_WEB_BIND_REQUIRES_ACKNOWLEDGEMENT",
             json_output=False,
         )
@@ -1220,6 +1256,26 @@ def discover(
     exclude_agency: bool = typer.Option(
         False, "--exclude-agency", help="Exclude recruiter and staffing-agency listings."
     ),
+    smart_expand: bool = typer.Option(
+        False,
+        "--smart-expand",
+        help="Run at most two additional profile-aware searches with conservative delays.",
+    ),
+    discovery_mode: DiscoveryMode = typer.Option(
+        DiscoveryMode.HYBRID,
+        "--discovery-mode",
+        help="BOSS acquisition surface: search, recommendation, or hybrid.",
+    ),
+    prefer_new: bool = typer.Option(
+        True,
+        "--prefer-new/--no-prefer-new",
+        help="Place jobs not shown to this candidate ahead of previously seen jobs.",
+    ),
+    only_new: bool = typer.Option(
+        False,
+        "--only-new",
+        help="Exclude jobs already present in this candidate's saved discovery history.",
+    ),
     strict_salary: bool = typer.Option(
         False, "--strict-salary", help="Exclude jobs whose salary is undisclosed."
     ),
@@ -1267,6 +1323,10 @@ def discover(
             experience_requirements=tuple(experience or ()),
             include_undisclosed_salary=not strict_salary,
             exclusions=tuple(dict.fromkeys(exclusions)),
+            smart_expand=smart_expand,
+            discovery_mode=discovery_mode,
+            prefer_new=prefer_new,
+            only_new=only_new,
             sources=(JobSource.BOSS,),
             limit=limit,
         )
@@ -1478,23 +1538,48 @@ def _render_discovery(
             )
         console.print(detail_table)
 
+    if run.profile_snapshot is not None:
+        snapshot = run.profile_snapshot
+        expansion = (
+            f" · expanded: {', '.join(snapshot.expansion_queries)}"
+            if snapshot.expansion_queries
+            else ""
+        )
+        console.print(
+            f"Profile {snapshot.candidate_id}@{snapshot.profile_version} used for ranking · "
+            f"{snapshot.evidence_count} evidence items · {snapshot.skill_count} skills{expansion}"
+        )
+
     jobs = Table(title=f"Ranked jobs · {len(run.hits)} results", expand=True)
     jobs.add_column("#", justify="right")
     jobs.add_column("Score", justify="right")
     jobs.add_column("Job")
     jobs.add_column("Company")
     jobs.add_column("Location / Salary")
+    jobs.add_column("Profile match")
     jobs.add_column("Source links")
     for index, hit in enumerate(run.hits, start=1):
         links = "\n".join(
             f"[link={link.url}]{link.source.value}[/link]" for link in hit.job.source_links
         )
+        breakdown = hit.rank_breakdown
+        freshness = "NEW" if hit.is_new_to_candidate else "SEEN"
+        channels = "+".join(channel.value for channel in hit.job.acquisition_channels)
+        explanation = f"{freshness} · {channels}\n" + (
+            ", ".join(hit.matched_profile_skills) or "—"
+        )
+        if breakdown is not None:
+            explanation += (
+                f"\ntarget {breakdown.target_relevance}/40 · "
+                f"profile {breakdown.profile_skills + breakdown.profile_evidence}/40"
+            )
         jobs.add_row(
             str(index),
             str(hit.rank_score),
             hit.job.title,
             hit.job.company_name,
             " / ".join(value for value in (hit.job.location, hit.job.salary_text) if value),
+            explanation,
             links,
         )
     console.print(jobs)

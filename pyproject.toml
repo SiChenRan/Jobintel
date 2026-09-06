@@ -45,6 +45,14 @@ packages = ["src/jobintel"]
 [tool.hatch.build.targets.wheel.force-include]
 "data/jobintel_seed" = "jobintel/data/jobintel_seed"
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/jobintel/**/*",
+    "/data/jobintel_seed/*.json",
+    "/README.md",
+    "/pyproject.toml",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

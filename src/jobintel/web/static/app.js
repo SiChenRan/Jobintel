@@ -1,11 +1,14 @@
 const state = {
   dashboard: null, health: null, previewId: null, currentDiscovery: null,
-  currentAnalysis: null, currentOutreach: null,
+  currentAnalysis: null, currentOutreach: null, csrfToken: null, user: null,
+  environment: null,
 };
 const titles = {
   dashboard: ["概览", "求职工作台"], profiles: ["档案", "候选人档案"],
   discovery: ["职位", "发现职位"], analyses: ["分析", "深入分析"],
-  radar: ["雷达", "职位雷达"],
+  radar: ["雷达", "职位雷达"], account: ["账户", "账户管理"],
+  "admin-users": ["平台运营", "用户管理"],
+  "admin-environment": ["系统中心", "运行配置"],
 };
 const labels = {
   strong_apply: "强烈建议申请", apply: "建议申请", low_priority: "低优先级", skip: "暂不建议申请",
@@ -49,9 +52,19 @@ const secureExternalLinks = root => {
 };
 
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  const requestOptions = { ...options };
+  const method = (requestOptions.method || "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && state.csrfToken) {
+    const headers = new Headers(requestOptions.headers || {});
+    headers.set("X-CSRF-Token", state.csrfToken);
+    requestOptions.headers = headers;
+  }
+  const response = await fetch(path, requestOptions);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      window.location.replace("/login");
+    }
     const detail = payload.detail || payload;
     const error = new Error(detail.message || `请求失败 (${response.status})`);
     error.code = detail.code;
@@ -61,9 +74,69 @@ async function api(path, options = {}) {
   return payload;
 }
 
+async function loadAuthentication() {
+  const status = await api("/api/auth/status");
+  if (!status.authenticated) {
+    window.location.replace("/login");
+    throw new Error("登录状态已失效");
+  }
+  state.csrfToken = status.csrf_token;
+  state.user = status.user;
+  document.body.classList.add(status.user.role === "admin" ? "role-admin" : "role-candidate");
+  const roleLabel = status.user.role === "admin" ? "平台管理员" : "候选人账户";
+  const avatarText = (status.user.display_name || status.user.username || "U").trim().slice(0, 1);
+  $("#current-user").textContent = status.user.display_name;
+  $("#current-role").textContent = roleLabel;
+  $("#sidebar-user-name").textContent = status.user.display_name;
+  $("#sidebar-user-role").textContent = roleLabel;
+  $("#sidebar-avatar").textContent = avatarText;
+  $("#top-avatar").textContent = avatarText;
+  $("#account-summary").innerHTML = `<strong>${escapeHtml(status.user.display_name)}</strong><span>用户名：${escapeHtml(status.user.username)}</span><span>${status.user.role === "admin" ? "项目管理员" : `候选人编号：${escapeHtml(status.user.candidate_id)}`}</span>`;
+  const profileForm = $("#account-profile-form");
+  profileForm.elements.display_name.value = status.user.display_name;
+  profileForm.elements.email.value = status.user.email || "";
+  $("#admin-user-panel").hidden = status.user.role !== "admin";
+  $$('[data-role="candidate"]').forEach(element => { element.hidden = status.user.role !== "candidate"; });
+  if (status.user.role === "candidate") {
+    const candidateInput = $("#profile-form").elements.candidate_id;
+    candidateInput.value = status.user.candidate_id;
+    candidateInput.readOnly = true;
+  }
+}
+
+async function logout() {
+  const button = $("#logout-button");
+  button.disabled = true;
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+    state.csrfToken = null;
+    window.location.replace("/login");
+  } catch (error) {
+    button.disabled = false;
+    toast(error.message, true);
+  }
+}
+
+let activeTaskCount = 0;
 function busy(active, text = "正在处理…") {
-  $("#loading-text").textContent = text;
-  $("#loading").classList.toggle("active", active);
+  activeTaskCount = Math.max(0, activeTaskCount + (active ? 1 : -1));
+  $("#loading-count").textContent = activeTaskCount;
+  $("#loading-text").textContent = active
+    ? text
+    : activeTaskCount > 0 ? `${activeTaskCount} 个任务仍在后台运行` : "任务已完成";
+  $("#loading").classList.toggle("active", activeTaskCount > 0);
+}
+
+function setActionPending(button, pending, pendingText = "处理中…") {
+  if (!button) return;
+  if (pending) {
+    button.dataset.idleText = button.textContent;
+    button.textContent = pendingText;
+  } else if (button.dataset.idleText) {
+    button.textContent = button.dataset.idleText;
+    delete button.dataset.idleText;
+  }
+  button.disabled = pending;
 }
 
 let toastTimer;
@@ -83,6 +156,8 @@ function showView(name) {
   $(".sidebar").classList.remove("open");
   if (name === "analyses") loadAnalyses();
   if (name === "radar") loadRadar();
+  if (name === "admin-users") loadAdminUsers();
+  if (name === "admin-environment") loadEnvironment();
 }
 
 async function loadDashboard() {
@@ -98,7 +173,7 @@ async function loadDashboard() {
 
 function renderDashboard() {
   const counts = state.dashboard.counts;
-  const metrics = [["候选人", counts.candidates], ["真实职位", counts.jobs], ["搜索批次", counts.discoveries], ["深入分析", counts.analyses], ["沟通草稿", counts.outreach_drafts], ["雷达检查", counts.radar_checks]];
+  const metrics = [["候选人档案", counts.candidates], ["真实职位", counts.jobs], ["搜索批次", counts.discoveries], ["深入分析", counts.analyses], ["沟通草稿", counts.outreach_drafts], ["雷达检查", counts.radar_checks]];
   $("#metrics").innerHTML = metrics.map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join("");
   $("#provider-name").textContent = state.health.provider;
   const ready = state.health.boss_browser_ready;
@@ -138,7 +213,10 @@ function renderNotificationEmailSetting() {
 
 function fillSelectors() {
   const profiles = (state.dashboard && state.dashboard.profiles) || [];
-  const options = profiles.map(item => `<option value="${escapeHtml(item.candidate_id)}">${escapeHtml(item.candidate_id)} · v${item.profile_version}</option>`).join("");
+  const ownCandidate = state.user && state.user.role === "candidate" ? state.user.candidate_id : null;
+  const options = profiles.length
+    ? profiles.map(item => `<option value="${escapeHtml(item.candidate_id)}">${escapeHtml(item.candidate_id)} · v${item.profile_version}</option>`).join("")
+    : ownCandidate ? `<option value="${escapeHtml(ownCandidate)}">${escapeHtml(ownCandidate)} · 尚未建立档案</option>` : "";
   $("#candidate-select").innerHTML = options || "<option value=''>请先创建档案</option>";
   const notificationSelect = $("#notification-candidate-select");
   const selectedCandidate = notificationSelect.value;
@@ -152,6 +230,131 @@ function fillSelectors() {
   $("#radar-baseline").innerHTML = baselines.map(item => `<option value="${escapeHtml(item.run_id)}">${escapeHtml(item.query || "雷达检查")} · ${escapeHtml(item.city || "全部地区")} · ${item.run_id.slice(-8)}</option>`).join("") || "<option value=''>请先完成一次职位搜索</option>";
 }
 
+async function loadAdminUsers() {
+  try {
+    const users = await api("/api/admin/users");
+    const admins = users.filter(user => user.role === "admin");
+    const candidates = users.filter(user => user.role === "candidate");
+    const active = candidates.filter(user => user.is_active).length;
+    const profiles = candidates.filter(user => user.profile_exists).length;
+    $("#admin-user-summary").textContent = `${users.length} 个注册用户 · ${active} 个正常候选人 · ${candidates.length - active} 个已停用`;
+    const adminMetricValues = [users.length, active, candidates.length - active, profiles];
+    $$("#admin-metrics article strong").forEach((element, index) => { element.textContent = adminMetricValues[index]; });
+    const renderUser = user => {
+      const isAdmin = user.role === "admin";
+      const status = user.account_status === "active" ? "正常" : "已停用";
+      const profile = user.profile_exists ? `档案 v${user.profile_version}` : "尚未建立档案";
+      const detail = isAdmin ? `项目管理员 · 用户名 ${escapeHtml(user.username)} · 最近登录 ${formatDate(user.last_login_at)}` : `用户名 ${escapeHtml(user.username)} · ${profile} · 注册于 ${formatDate(user.created_at)} · 最近登录 ${formatDate(user.last_login_at)}`;
+      const searchText = escapeHtml(`${user.display_name} ${user.username} ${user.email || ""}`.toLocaleLowerCase("zh-CN"));
+      const initial = escapeHtml((user.display_name || user.username).trim().slice(0, 1));
+      const identity = `<div class="user-identity"><span class="user-avatar ${isAdmin ? "admin" : ""}">${initial}</span><div><strong>${escapeHtml(user.display_name)} <span class="status-chip ${user.is_active ? "" : "disabled"}">${status}</span></strong><small>${detail}</small><small>${escapeHtml(user.email || "未设置邮箱")}</small></div></div>`;
+      if (isAdmin) return `<div class="user-row admin-user-row" data-user-search-text="${searchText}">${identity}<span class="role-chip">管理员</span></div>`;
+      return `<div class="user-row candidate-user-row" data-user-row="${escapeHtml(user.user_id)}" data-user-search-text="${searchText}">${identity}<div class="user-edit-fields"><label>姓名<input data-user-display-name="${escapeHtml(user.user_id)}" value="${escapeHtml(user.display_name)}" maxlength="80"></label><label>邮箱<input data-user-email="${escapeHtml(user.user_id)}" value="${escapeHtml(user.email || "")}" type="email" maxlength="320"></label><button class="button secondary" data-user-save="${escapeHtml(user.user_id)}">保存资料</button></div><div class="user-actions"><button class="button ${user.is_active ? "danger-outline" : "success-outline"}" data-user-status="${escapeHtml(user.user_id)}" data-active="${user.is_active}">${user.is_active ? "停用账户" : "启用账户"}</button><label class="password-reset-field">临时密码<input type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="至少 10 个字符" data-user-password="${escapeHtml(user.user_id)}"></label><button class="button secondary" data-user-reset="${escapeHtml(user.user_id)}">重置密码</button></div></div>`;
+    };
+    const groups = [
+      ["管理员账号", admins],
+      ["候选人", candidates],
+    ].filter(([, items]) => items.length);
+    $("#admin-user-list").innerHTML = groups.map(([title, items]) => `<div class="user-group-title">${title}<span>${items.length}</span></div>${items.map(renderUser).join("")}`).join("") || "<div class='empty-state'>暂无项目成员</div>";
+    $$('[data-user-save]').forEach(button => button.addEventListener("click", () => saveAdminUser(button.dataset.userSave)));
+    $$('[data-user-status]').forEach(button => button.addEventListener("click", () => setUserStatus(button.dataset.userStatus, button.dataset.active !== "true")));
+    $$('[data-user-reset]').forEach(button => button.addEventListener("click", () => resetUserPassword(button.dataset.userReset)));
+  } catch (error) { toast(error.message, true); }
+}
+
+async function loadEnvironment() {
+  try {
+    const config = await api("/api/admin/environment");
+    state.environment = config;
+    const form = $("#environment-form");
+    const fields = [
+      "llm_provider", "deepseek_model", "deepseek_base_url", "openai_model",
+      "anthropic_model", "smtp_host", "smtp_port", "smtp_transport", "smtp_username",
+      "smtp_from_address", "smtp_timeout_seconds", "discovery_cdp_port",
+      "discovery_search_min_delay_seconds", "discovery_search_max_delay_seconds",
+      "discovery_detail_min_delay_seconds", "discovery_detail_max_delay_seconds",
+      "discovery_detail_cache_hours", "radar_min_interval_hours",
+    ];
+    fields.forEach(name => { form.elements[name].value = config[name] === null || config[name] === undefined ? "" : config[name]; });
+    ["deepseek_api_key", "openai_api_key", "anthropic_api_key", "smtp_password"].forEach(name => { form.elements[name].value = ""; });
+    $("#llm-config-status").textContent = `DeepSeek Key ${config.deepseek_api_key_configured ? "已配置" : "未配置"} · OpenAI Key ${config.openai_api_key_configured ? "已配置" : "未配置"} · Anthropic Key ${config.anthropic_api_key_configured ? "已配置" : "未配置"}`;
+    $("#smtp-config-status").textContent = `${config.smtp_notification_ready ? "邮件服务已就绪" : "邮件服务未就绪"} · SMTP 授权码 ${config.smtp_password_configured ? "已配置" : "未配置"}`;
+    $("#boss-config-status").textContent = config.boss_browser_ready ? "Chrome 调试连接正常" : "Chrome 调试连接未就绪";
+    const setConfigBadge = (selector, ready, readyText = "已就绪", warningText = "待配置") => {
+      const badge = $(selector);
+      badge.textContent = ready ? readyText : warningText;
+      badge.className = `config-state ${ready ? "ready" : "warning"}`;
+    };
+    setConfigBadge("#llm-config-badge", config.deepseek_api_key_configured || config.openai_api_key_configured || config.anthropic_api_key_configured);
+    setConfigBadge("#smtp-config-badge", config.smtp_notification_ready);
+    setConfigBadge("#boss-config-badge", config.boss_browser_ready, "连接正常", "未连接");
+  } catch (error) { toast(error.message, true); }
+}
+
+function environmentPayload(form) {
+  const data = new FormData(form);
+  const numberFields = new Set([
+    "smtp_port", "smtp_timeout_seconds", "discovery_cdp_port",
+    "discovery_search_min_delay_seconds", "discovery_search_max_delay_seconds",
+    "discovery_detail_min_delay_seconds", "discovery_detail_max_delay_seconds",
+    "discovery_detail_cache_hours", "radar_min_interval_hours",
+  ]);
+  const payload = {};
+  data.forEach((value, key) => {
+    if (["deepseek_api_key", "openai_api_key", "anthropic_api_key", "smtp_password"].includes(key) && value === "") return;
+    payload[key] = numberFields.has(key) ? Number(value) : value;
+  });
+  return payload;
+}
+
+async function saveAdminUser(userId) {
+  const nameInput = $$('[data-user-display-name]').find(item => item.dataset.userDisplayName === userId);
+  const emailInput = $$('[data-user-email]').find(item => item.dataset.userEmail === userId);
+  busy(true, "正在保存用户资料…");
+  try {
+    await api(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: nameInput.value, email: emailInput.value }),
+    });
+    await loadAdminUsers();
+    toast("用户资料已更新");
+  } catch (error) { toast(error.message, true); } finally { busy(false); }
+}
+
+async function setUserStatus(userId, isActive) {
+  busy(true, isActive ? "正在启用账户…" : "正在停用账户…");
+  try {
+    await api(`/api/admin/users/${encodeURIComponent(userId)}/status`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: isActive }),
+    });
+    await loadAdminUsers();
+    toast(isActive ? "账户已启用" : "账户已停用");
+  } catch (error) { toast(error.message, true); } finally { busy(false); }
+}
+
+async function resetUserPassword(userId) {
+  const input = $$('[data-user-password]').find(item => item.dataset.userPassword === userId);
+  const password = input ? input.value : "";
+  if (password.length < 10) { toast("密码至少需要 10 个字符", true); return; }
+  busy(true, "正在重置密码…");
+  try {
+    await api(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    input.value = "";
+    toast("密码已重置，该用户的现有会话已注销");
+  } catch (error) { toast(error.message, true); } finally { busy(false); }
+}
+
+function filterAdminUsers(query) {
+  const normalized = query.trim().toLocaleLowerCase("zh-CN");
+  $$('[data-user-search-text]').forEach(row => {
+    row.hidden = normalized !== "" && !row.dataset.userSearchText.includes(normalized);
+  });
+}
+
 function renderProfilePreview(preview) {
   const evidence = preview.evidence.map((item, index) => `<article class="evidence"><header><strong>${index + 1}. ${escapeHtml(item.title)}</strong><span>${escapeHtml(item.evidence_type)}</span></header><p>${escapeHtml(item.content)}</p><div class="tags">${item.skills.map(skill => `<span class="tag">${escapeHtml(skill)}</span>`).join("")}</div></article>`).join("");
   $("#profile-preview").className = "preview-content";
@@ -161,6 +364,8 @@ function renderProfilePreview(preview) {
 
 async function confirmProfile() {
   if (!state.previewId || !confirm("确认后将创建不可变的候选人档案新版本，是否继续？")) return;
+  const actionButton = $("#confirm-profile");
+  setActionPending(actionButton, true, "正在创建…");
   busy(true, "正在保存候选人档案…");
   try {
     const profile = await api("/api/profiles/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preview_id: state.previewId }) });
@@ -169,7 +374,10 @@ async function confirmProfile() {
     await loadDashboard();
     renderProfilePreview({ ...profile, evidence: profile.evidence });
     $("#confirm-profile").remove();
-  } catch (error) { toast(error.message, true); } finally { busy(false); }
+  } catch (error) { toast(error.message, true); } finally {
+    busy(false);
+    setActionPending(actionButton, false);
+  }
 }
 
 function discoveryPayload(form) {
@@ -182,7 +390,8 @@ function discoveryPayload(form) {
     daily_salary_min_yuan: numberOrNull(data.get("daily_salary_min_yuan")), daily_salary_max_yuan: numberOrNull(data.get("daily_salary_max_yuan")),
     employment_types: employment ? [employment] : [], company_sizes: companySize ? [companySize] : [], education_requirements: splitValues(data.get("education")),
     experience_requirements: splitValues(data.get("experience")), exclusions: splitValues(data.get("exclusions")),
-    exclude_outsourcing: data.has("exclude_outsourcing"), exclude_training: data.has("exclude_training"), exclude_agency: data.has("exclude_agency"),
+    exclude_outsourcing: data.has("exclude_outsourcing"), exclude_training: data.has("exclude_training"), exclude_agency: data.has("exclude_agency"), smart_expand: data.has("smart_expand"),
+    discovery_mode: data.get("discovery_mode"), prefer_new: data.has("prefer_new"), only_new: data.has("only_new"),
     strict_salary: data.has("strict_salary"), limit: Number(data.get("limit")), detail_top: Number(data.get("detail_top")),
   };
 }
@@ -190,6 +399,8 @@ function discoveryPayload(form) {
 function describeDiscoveryFilters(preference) {
   const filters = [];
   const employmentLabels = { internship: "实习", full_time: "全职", part_time: "兼职", other: "其他" };
+  const modeLabels = { search: "关键词搜索", recommendation: "首页推荐", hybrid: "混合发现" };
+  filters.push(`采集：${modeLabels[preference.discovery_mode] || "关键词搜索"}`);
   if (preference.city) filters.push(`城市：${preference.city}`);
   (preference.employment_types || []).forEach(value => filters.push(`职位类型：${employmentLabels[value] || value}`));
   (preference.company_sizes || []).forEach(value => filters.push(`公司规模：${companySizeLabels[value] || value}`));
@@ -200,24 +411,49 @@ function describeDiscoveryFilters(preference) {
   (preference.education_requirements || []).forEach(value => filters.push(`学历：${value}`));
   (preference.experience_requirements || []).forEach(value => filters.push(`经验：${value}`));
   (preference.exclusions || []).forEach(value => filters.push(`排除：${value}`));
+  if (preference.smart_expand) filters.push(`档案扩展：${(preference.expanded_queries || []).join("、") || "已启用"}`);
   if (!preference.include_undisclosed_salary) filters.push("排除薪资面议");
+  if (preference.only_new) filters.push("仅显示未见岗位");
+  else if (preference.prefer_new) filters.push("新岗位优先");
   return filters;
+}
+
+function renderRankExplanation(hit) {
+  const breakdown = hit.rank_breakdown;
+  if (!breakdown) {
+    return `<div class="tags">${(hit.matched_terms || []).slice(0, 8).map(term => `<span class="tag">${escapeHtml(term)}</span>`).join("")}</div>`;
+  }
+  const queryTags = (hit.matched_query_terms || []).slice(0, 6).map(term => `<span class="tag query-tag">目标 · ${escapeHtml(term)}</span>`).join("");
+  const profileTags = (hit.matched_profile_skills || []).slice(0, 8).map(term => `<span class="tag profile-tag">档案 · ${escapeHtml(term)}</span>`).join("");
+  const evidence = (hit.matched_evidence || []).slice(0, 3).map(item => `${escapeHtml(item.title)}（${item.matched_terms.map(escapeHtml).join("、")}）`).join(" · ");
+  return `<div class="rank-breakdown"><span>目标相关 ${breakdown.target_relevance}/40</span><span>档案技能 ${breakdown.profile_skills}/30</span><span>档案证据 ${breakdown.profile_evidence}/10</span><span>筛选契合 ${breakdown.preference_fit}/10</span><span>信息质量 ${breakdown.information_quality}/10</span></div><div class="tags">${queryTags}${profileTags}</div><p class="profile-evidence">${evidence ? `命中证据：${evidence}` : "当前档案没有命中可引用证据"}</p>`;
 }
 
 function renderDiscovery(run) {
   state.currentDiscovery = run;
   const failures = run.source_attempts.filter(item => item.status !== "success");
   const activeFilters = describeDiscoveryFilters(run.preference);
-  const cards = run.hits.map((hit, index) => { const job = hit.job; const link = job.source_links[0]; const size = companySizeLabels[job.company_size] || "规模未披露"; return `<article class="job-card"><div class="rank-score">${hit.rank_score}</div><div><h4>${index + 1}. ${escapeHtml(job.title)}</h4><p class="company">${escapeHtml(job.company_name)}</p><div class="job-meta"><span>${escapeHtml(job.location || "地点未披露")}</span><span>${escapeHtml(size)}</span><span>${escapeHtml(job.salary_text || "薪资面议")}</span><span>${escapeHtml(job.experience || "经验不限")}</span><span>${escapeHtml(job.education || "学历不限")}</span></div><div class="tags">${hit.matched_terms.slice(0, 8).map(term => `<span class="tag">${escapeHtml(term)}</span>`).join("")}</div></div><a class="job-link" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">打开 BOSS ↗</a></article>`; }).join("");
-  $("#discovery-result").innerHTML = `<div class="result-header"><div><h3>${run.hits.length} 个匹配职位</h3><p>抓取 ${run.total_discovered} · 去重 ${run.duplicates_removed} · 过滤 ${run.filtered_out} · 批次 ${run.run_id.slice(-8)}</p></div><button class="button primary" id="analyze-current" ${run.hits.length ? "" : "disabled"}>深入分析前 3 个</button></div><div class="filter-summary"><strong>档案 ${escapeHtml(run.preference.candidate_id)} 仅用于匹配排序</strong><span>${activeFilters.length ? `当前筛选：${activeFilters.map(escapeHtml).join(" · ")}` : "未启用额外筛选"}</span></div>${failures.length ? `<div class="preview-summary">来源异常：${escapeHtml(failures.map(item => item.message || item.status).join("；"))}</div>` : ""}<div class="job-list">${cards || "<div class='empty-state tall'>没有满足当前条件的职位</div>"}</div>`;
+  const profile = run.profile_snapshot;
+  const profileSummary = profile ? `<strong>档案 ${escapeHtml(profile.candidate_id)} · v${profile.profile_version} 已参与排序</strong><span>${profile.evidence_count} 条证据 · ${profile.skill_count} 项技能${profile.expansion_queries.length ? ` · 扩展搜索：${profile.expansion_queries.map(escapeHtml).join("、")}` : ""}</span>` : `<strong>档案 ${escapeHtml(run.preference.candidate_id)} 的旧搜索记录</strong>`;
+  const channelLabels = { search: "关键词搜索", recommendation: "首页推荐" };
+  const cards = run.hits.map((hit, index) => {
+    const job = hit.job;
+    const link = job.source_links[0];
+    const size = companySizeLabels[job.company_size] || "规模未披露";
+    const channels = (job.acquisition_channels || ["search"]).map(channel => `<span class="source-tag ${channel}">${channelLabels[channel] || channel}</span>`).join("");
+    const freshness = hit.is_new_to_candidate ? '<span class="freshness-tag">首次发现</span>' : '<span class="freshness-tag seen">历史已见</span>';
+    return `<article class="job-card"><div class="rank-score" title="候选人档案与目标岗位的可解释粗排分">${hit.rank_score}</div><div><div class="job-badges">${freshness}${channels}</div><h4>${index + 1}. ${escapeHtml(job.title)}</h4><p class="company">${escapeHtml(job.company_name)}</p><div class="job-meta"><span>${escapeHtml(job.location || "地点未披露")}</span><span>${escapeHtml(size)}</span><span>${escapeHtml(job.salary_text || "薪资面议")}</span><span>${escapeHtml(job.experience || "经验不限")}</span><span>${escapeHtml(job.education || "学历不限")}</span></div>${renderRankExplanation(hit)}</div><a class="job-link" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">打开 BOSS ↗</a></article>`;
+  }).join("");
+  const newCount = run.hits.filter(hit => hit.is_new_to_candidate).length;
+  $("#discovery-result").innerHTML = `<div class="result-header"><div><h3>${run.hits.length} 个匹配职位</h3><p>新增 ${newCount} · 历史已见 ${run.hits.length - newCount} · 抓取 ${run.total_discovered} · 去重 ${run.duplicates_removed} · 过滤 ${run.filtered_out} · 批次 ${run.run_id.slice(-8)}</p></div><button class="button primary" id="analyze-current" ${run.hits.length ? "" : "disabled"}>深入分析前 3 个</button></div><div class="filter-summary profile-summary">${profileSummary}<span>${activeFilters.length ? `当前筛选：${activeFilters.map(escapeHtml).join(" · ")}` : "未启用额外筛选"}</span></div>${failures.length ? `<div class="preview-summary">来源异常：${escapeHtml(failures.map(item => item.message || item.status).join("；"))}</div>` : ""}<div class="job-list">${cards || "<div class='empty-state tall'>没有满足当前条件的职位</div>"}</div>`;
   secureExternalLinks($("#discovery-result"));
   const analyzeButton = $("#analyze-current");
   if (analyzeButton) analyzeButton.addEventListener("click", () => analyzeRun(run.run_id, 3));
   const emailButton = document.createElement("button");
   emailButton.className = "button secondary";
-  const profile = state.dashboard.profiles.find(item => item.candidate_id === run.preference.candidate_id);
+  const candidateProfile = state.dashboard.profiles.find(item => item.candidate_id === run.preference.candidate_id);
   const smtpReady = state.health.smtp_notification_ready;
-  const recipientReady = profile && profile.email_notification_configured;
+  const recipientReady = candidateProfile && candidateProfile.email_notification_configured;
   emailButton.disabled = !run.hits.length || !smtpReady || !recipientReady;
   if (!run.hits.length) {
     emailButton.textContent = "无职位可发送";
@@ -229,11 +465,13 @@ function renderDiscovery(run) {
     emailButton.textContent = "请先设置接收邮箱";
     emailButton.title = "请先为该候选人设置接收邮箱";
   } else emailButton.textContent = "发送邮件";
-  emailButton.addEventListener("click", () => emailDiscovery(run));
+  emailButton.addEventListener("click", () => emailDiscovery(run, emailButton));
   $(".result-header", $("#discovery-result")).append(emailButton);
 }
 
 async function analyzeRun(runId, top) {
+  const actionButton = $("#analyze-current");
+  setActionPending(actionButton, true, "分析正在后台运行…");
   busy(true, `正在深入分析前 ${top} 个职位…`);
   try {
     const result = await api(`/api/discoveries/${encodeURIComponent(runId)}/analyze`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ top }) });
@@ -241,15 +479,22 @@ async function analyzeRun(runId, top) {
     toast(`深入分析完成 ${succeeded}/${result.analyses.length}`);
     await loadDashboard();
     showView("analyses");
-  } catch (error) { toast(error.message, true); } finally { busy(false); }
+  } catch (error) { toast(error.message, true); } finally {
+    busy(false);
+    setActionPending(actionButton, false);
+  }
 }
 
-async function emailDiscovery(run) {
+async function emailDiscovery(run, actionButton = null) {
+  setActionPending(actionButton, true, "正在发送…");
   busy(true, "正在发送职位通知…");
   try {
     const receipt = await api(`/api/discoveries/${encodeURIComponent(run.run_id)}/notifications/email`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ limit: run.hits.length }) });
     toast(`已发送 ${receipt.job_count} 个职位到 ${receipt.recipient_masked}`);
-  } catch (error) { toast(error.message, true); } finally { busy(false); }
+  } catch (error) { toast(error.message, true); } finally {
+    busy(false);
+    setActionPending(actionButton, false);
+  }
 }
 
 async function loadAnalyses() {
@@ -341,15 +586,20 @@ function bindOutreachActions() {
   const generateForm = $("#outreach-generate-form");
   if (generateForm) generateForm.addEventListener("submit", async event => {
     event.preventDefault();
+    const actionButton = event.submitter;
     const form = new FormData(event.currentTarget);
     const focus = form.getAll("focus_requirement_ids");
     if (focus.length > 3) { toast("沟通重点最多选择 3 项", true); return; }
+    setActionPending(actionButton, true, "正在生成…");
     busy(true, "正在生成并校验沟通草稿…");
     try {
       state.currentOutreach = await api(`/api/analyses/${encodeURIComponent(state.currentAnalysis.analysis_id)}/outreach-drafts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tone: form.get("tone"), focus_requirement_ids: focus }) });
       renderAnalysisDialog();
       toast("沟通草稿已生成");
-    } catch (error) { toast(error.message, true); } finally { busy(false); }
+    } catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
   });
 
   const editor = $("#outreach-message");
@@ -407,25 +657,121 @@ function renderRadar(check) {
 }
 async function showRadar(id) { try { renderRadar(await api(`/api/radar/checks/${encodeURIComponent(id)}`)); } catch (error) { toast(error.message, true); } }
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+  try {
+    await loadAuthentication();
+  } catch {
+    return;
+  }
   $$("[data-view]").forEach(item => item.addEventListener("click", () => showView(item.dataset.view)));
   $$("[data-go]").forEach(item => item.addEventListener("click", () => showView(item.dataset.go)));
   $("#menu-button").addEventListener("click", () => $(".sidebar").classList.toggle("open"));
-  $("#refresh-button").addEventListener("click", () => loadDashboard().then(() => toast("数据已刷新")));
+  $("#refresh-button").addEventListener("click", async () => {
+    const activeElement = $(".view.active");
+    const activeView = activeElement ? activeElement.id.replace("view-", "") : "";
+    if (activeView === "admin-users") await loadAdminUsers();
+    else if (activeView === "admin-environment") await loadEnvironment();
+    else if (state.user.role === "candidate") await loadDashboard();
+    toast("数据已刷新");
+  });
+  $("#logout-button").addEventListener("click", logout);
   $("#reload-analyses").addEventListener("click", loadAnalyses);
+  $("#admin-user-search").addEventListener("input", event => filterAdminUsers(event.currentTarget.value));
+  $("#admin-users-refresh").addEventListener("click", async () => {
+    await loadAdminUsers();
+    toast("用户数据已刷新");
+  });
   $(".dialog-close").addEventListener("click", () => $("#detail-dialog").close());
 
+  $("#change-password-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const actionButton = event.submitter;
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    if (data.get("new_password") !== data.get("confirm_password")) {
+      toast("两次输入的新密码不一致", true);
+      return;
+    }
+    setActionPending(actionButton, true, "正在更新…");
+    busy(true, "正在更新密码…");
+    try {
+      const status = await api("/api/auth/change-password", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_password: data.get("current_password"), new_password: data.get("new_password") }),
+      });
+      state.csrfToken = status.csrf_token;
+      form.reset();
+      toast("密码已更新，其他设备已退出登录");
+    } catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
+  });
+
+  $("#account-profile-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const actionButton = event.submitter;
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    setActionPending(actionButton, true, "正在保存…");
+    busy(true, "正在保存个人资料…");
+    try {
+      const user = await api("/api/auth/profile", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ display_name: data.get("display_name"), email: data.get("email") }),
+      });
+      state.user = user;
+      const avatarText = (user.display_name || user.username || "U").trim().slice(0, 1);
+      $("#current-user").textContent = user.display_name;
+      $("#sidebar-user-name").textContent = user.display_name;
+      $("#sidebar-avatar").textContent = avatarText;
+      $("#top-avatar").textContent = avatarText;
+      $("#account-summary").querySelector("strong").textContent = user.display_name;
+      if (user.role === "admin") await loadAdminUsers();
+      toast("个人资料已保存");
+    } catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
+  });
+
+  $("#environment-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const actionButton = event.submitter;
+    setActionPending(actionButton, true, "正在应用…");
+    busy(true, "正在保存项目配置…");
+    try {
+      await api("/api/admin/environment", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(environmentPayload(event.currentTarget)),
+      });
+      await loadEnvironment();
+      toast("项目配置已保存并应用");
+    } catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
+  });
+
   $("#profile-form").addEventListener("submit", async event => {
-    event.preventDefault(); busy(true, "正在从简历提取可引用证据…");
+    event.preventDefault();
+    const actionButton = event.submitter;
+    setActionPending(actionButton, true, "正在解析…");
+    busy(true, "正在从简历提取可引用证据…");
     try { const result = await api("/api/profiles/preview", { method: "POST", body: new FormData(event.currentTarget) }); state.previewId = result.preview_id; renderProfilePreview(result.preview); toast("预览已生成，请审核后确认"); }
-    catch (error) { toast(error.message, true); } finally { busy(false); }
+    catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
   });
   $("#notification-candidate-select").addEventListener("change", renderNotificationEmailSetting);
   $("#notification-email-form").addEventListener("submit", async event => {
     event.preventDefault();
+    const actionButton = event.submitter;
     const form = event.currentTarget;
     const data = new FormData(form);
     const candidateId = data.get("candidate_id");
+    setActionPending(actionButton, true, "正在保存…");
     busy(true, "正在保存通知邮箱…");
     try {
       const result = await api(`/api/profiles/${encodeURIComponent(candidateId)}/notification-email`, {
@@ -435,17 +781,37 @@ document.addEventListener("DOMContentLoaded", () => {
       form.elements.recipient_email.value = "";
       await loadDashboard();
       toast(`已为 ${result.candidate_id} 保存邮箱 ${result.recipient_masked}`);
-    } catch (error) { toast(error.message, true); } finally { busy(false); }
+    } catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
   });
   $("#discovery-form").addEventListener("submit", async event => {
-    event.preventDefault(); busy(true, "正在搜索 BOSS 职位…");
+    event.preventDefault();
+    const actionButton = event.submitter;
+    setActionPending(actionButton, true, "正在后台发现…");
+    busy(true, "正在发现 BOSS 职位，可继续使用其他功能");
     try { const result = await api("/api/discoveries", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(discoveryPayload(event.currentTarget)) }); renderDiscovery(result.discovery); await loadDashboard(); toast(`找到 ${result.discovery.hits.length} 个匹配职位`); }
-    catch (error) { toast(error.message, true); } finally { busy(false); }
+    catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
   });
   $("#radar-form").addEventListener("submit", async event => {
-    event.preventDefault(); const data = new FormData(event.currentTarget); busy(true, "正在检查职位变化…");
+    event.preventDefault();
+    const actionButton = event.submitter;
+    const data = new FormData(event.currentTarget);
+    setActionPending(actionButton, true, "正在后台检查…");
+    busy(true, "正在检查职位变化，可继续使用其他功能");
     try { const check = await api("/api/radar/checks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ baseline_run_id: data.get("baseline_run_id"), detail_top: Number(data.get("detail_top")) }) }); renderRadar(check); await loadDashboard(); loadRadar(); toast("雷达检查已完成"); }
-    catch (error) { toast(error.message, true); } finally { busy(false); }
+    catch (error) { toast(error.message, true); } finally {
+      busy(false);
+      setActionPending(actionButton, false);
+    }
   });
-  loadDashboard();
+  if (state.user.role === "admin") {
+    showView("admin-users");
+  } else {
+    loadDashboard();
+  }
 });

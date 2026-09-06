@@ -38,7 +38,9 @@ htmlcov/
 .ruff_cache/
 
 # Local runtime data
-data/
+data/*
+!data/jobintel_seed/
+!data/jobintel_seed/*.json
 *.db
 *.sqlite
 *.sqlite3

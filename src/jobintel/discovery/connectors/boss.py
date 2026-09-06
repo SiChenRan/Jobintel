@@ -20,6 +20,8 @@ from jobintel.discovery.connectors.cdp import DEFAULT_CDP_PORT, CDPSession
 from jobintel.discovery.models import (
     DetailFetchResult,
     DetailFetchStatus,
+    DiscoveryChannel,
+    DiscoveryMode,
     EmploymentType,
     JobSearchPreference,
     JobSource,
@@ -34,8 +36,10 @@ from jobintel.discovery.models import (
 
 BOSS_ORIGIN = "https://www.zhipin.com"
 BOSS_SEARCH_PAGE = f"{BOSS_ORIGIN}/web/geek/job"
+BOSS_RECOMMENDATION_PAGE = f"{BOSS_ORIGIN}/web/geek/job-recommend"
 BOSS_API_PATH = "/wapi/zpgeek/search/joblist.json"
 _BOSS_PAGE_SIZE = 30
+_BOSS_RECOMMENDATION_ROUNDS = 3
 BOSS_CITY_CODES = {
     "北京": "101010100",
     "上海": "101020100",
@@ -143,6 +147,75 @@ _DETAIL_EXPRESSION = r"""(async () => {
   }});
 })()"""
 
+_RECOMMENDATION_EXPRESSION = r"""(() => {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const textOf = (root, selectors) => {
+    for (const selector of selectors) {
+      const node = root.querySelector(selector);
+      const value = node ? clean(node.innerText || node.textContent) : "";
+      if (value) return value;
+    }
+    return "";
+  };
+  const textsOf = (root, selectors) => {
+    const values = [];
+    for (const selector of selectors) {
+      for (const node of root.querySelectorAll(selector)) {
+        const value = clean(node.innerText || node.textContent);
+        if (value && !values.includes(value)) values.push(value);
+      }
+    }
+    return values;
+  };
+  if (/security-check|captcha|verify/i.test(location.href)
+      || document.querySelector(".security-check, .verify-box, .captcha-box")) {
+    return JSON.stringify({error: "blocked"});
+  }
+  if (/\/web\/user\//.test(location.href)) {
+    return JSON.stringify({error: "authentication_required"});
+  }
+  const jobs = [];
+  const seen = new Set();
+  for (const link of document.querySelectorAll('a[href*="/job_detail/"]')) {
+    const href = new URL(link.getAttribute("href"), location.origin).href;
+    const match = href.match(/\/job_detail\/([^/?#.]+)(?:\.html)?/);
+    const externalId = match ? match[1].replace(/\.html$/, "") : "";
+    if (!externalId || seen.has(externalId)) continue;
+    const card = link.closest(
+      ".job-card-wrapper, .job-card-box, .job-list-box li, .job-recommend-main li, li"
+    ) || link.parentElement;
+    if (!card) continue;
+    const title = textOf(card, [".job-name", ".job-name span", ".job-title"])
+      || clean(link.getAttribute("title"));
+    const companyName = textOf(card, [
+      ".company-name", ".company-info .name", ".company-text .name"
+    ]);
+    if (!title || !companyName) continue;
+    const labels = textsOf(card, [
+      ".tag-list li", ".job-card-footer li", ".job-labels span", ".welfare-list span"
+    ]);
+    const companyLabels = textsOf(card, [
+      ".company-tag-list li", ".company-info .tag-list li", ".company-info p"
+    ]);
+    jobs.push({
+      external_id: externalId,
+      title,
+      company_name: companyName,
+      location: textOf(card, [".job-area", ".job-location", ".job-address"]),
+      salary_text: textOf(card, [".salary", ".job-salary"]),
+      description: labels.join(", "),
+      experience: labels.find((value) => /经验|应届|不限|年/.test(value)) || "",
+      education: labels.find((value) => /学历|本科|硕士|博士|大专|中专/.test(value)) || "",
+      employment_type: labels.find((value) => /实习|兼职|全职/.test(value)) || "",
+      company_size: companyLabels.find((value) => /人|以上/.test(value)) || "",
+      url: href,
+      published_text: textOf(card, [".job-card-footer", ".boss-active-time"])
+    });
+    seen.add(externalId);
+  }
+  return JSON.stringify({jobs});
+})()"""
+
 
 class BossConnector:
     """Search BOSS in the origin page without exporting browser credentials."""
@@ -174,7 +247,7 @@ class BossConnector:
         self._jitter = jitter
 
     def search(self, preference: JobSearchPreference, *, limit: int) -> tuple[RawJobListing, ...]:
-        """Fetch bounded BOSS result pages through the logged-in browser."""
+        """Fetch bounded search, recommendation, or balanced hybrid listings."""
         cdp = self._session_factory(self._port)
         target_id: str | None = None
         try:
@@ -186,11 +259,53 @@ class BossConnector:
             )["result"]["sessionId"]
             cdp.send("Page.enable", session_id=session_id)
             cdp.send("Runtime.enable", session_id=session_id)
-            cdp.send("Page.navigate", {"url": BOSS_SEARCH_PAGE}, session_id)
-            self._wait_ready(cdp, session_id)
-            listings: list[RawJobListing] = []
-            source_query = self._source_query(preference)
-            for page in range(1, min(10, math.ceil(limit / _BOSS_PAGE_SIZE)) + 1):
+            search_results: tuple[RawJobListing, ...] = ()
+            recommendation_results: tuple[RawJobListing, ...] = ()
+            if preference.discovery_mode in {DiscoveryMode.SEARCH, DiscoveryMode.HYBRID}:
+                cdp.send("Page.navigate", {"url": BOSS_SEARCH_PAGE}, session_id)
+                self._wait_ready(cdp, session_id)
+                search_results = self._search_results(cdp, session_id, preference, limit=limit)
+            if preference.discovery_mode in {
+                DiscoveryMode.RECOMMENDATION,
+                DiscoveryMode.HYBRID,
+            }:
+                if search_results:
+                    self._sleep(self._jitter(*self._search_delay))
+                cdp.send("Page.navigate", {"url": BOSS_RECOMMENDATION_PAGE}, session_id)
+                self._wait_ready(cdp, session_id)
+                recommendation_results = self._recommendations(cdp, session_id, limit=limit)
+            return self._select_results(
+                search_results,
+                recommendation_results,
+                mode=preference.discovery_mode,
+                limit=limit,
+            )
+        finally:
+            if target_id is not None:
+                with suppress(Exception):
+                    cdp.send("Target.closeTarget", {"targetId": target_id})
+            cdp.close()
+
+    def _search_results(
+        self,
+        cdp: CDPSession,
+        session_id: str,
+        preference: JobSearchPreference,
+        *,
+        limit: int,
+    ) -> tuple[RawJobListing, ...]:
+        listings: list[RawJobListing] = []
+        queries = (preference.query, *preference.expanded_queries)
+        per_query_limit = math.ceil(limit / len(queries))
+        request_count = 0
+        for query in queries:
+            query_results: list[RawJobListing] = []
+            source_query = self._source_query(preference, query=query)
+            page_count = min(10, math.ceil(per_query_limit / _BOSS_PAGE_SIZE))
+            for page in range(1, page_count + 1):
+                if request_count:
+                    self._sleep(self._jitter(*self._search_delay))
+                request_count += 1
                 params: dict[str, str | int] = {
                     "scene": 1,
                     "query": source_query,
@@ -206,30 +321,85 @@ class BossConnector:
                     _FETCH_EXPRESSION.replace("__URL__", json.dumps(api_url)), session_id
                 )
                 page_items = self._parse(raw)
-                listings.extend(self._to_listing(item) for item in page_items)
-                if len(page_items) < _BOSS_PAGE_SIZE or len(listings) >= limit:
+                query_results.extend(
+                    self._to_listing(item, channel=DiscoveryChannel.SEARCH)
+                    for item in page_items
+                )
+                if len(page_items) < _BOSS_PAGE_SIZE or len(query_results) >= per_query_limit:
                     break
-                self._sleep(self._jitter(*self._search_delay))
-            return tuple(listings[:limit])
-        finally:
-            if target_id is not None:
-                with suppress(Exception):
-                    cdp.send("Target.closeTarget", {"targetId": target_id})
-            cdp.close()
+            listings.extend(query_results[:per_query_limit])
+        unique = {(item.source, item.external_id): item for item in listings}
+        return tuple(unique.values())[:limit]
+
+    def _recommendations(
+        self, cdp: CDPSession, session_id: str, *, limit: int
+    ) -> tuple[RawJobListing, ...]:
+        listings: dict[tuple[JobSource, str], RawJobListing] = {}
+        for round_index in range(_BOSS_RECOMMENDATION_ROUNDS):
+            raw = cdp.evaluate(_RECOMMENDATION_EXPRESSION, session_id)
+            for item in self._parse(raw):
+                listing = self._to_listing(item, channel=DiscoveryChannel.RECOMMENDATION)
+                listings[(listing.source, listing.external_id)] = listing
+            if len(listings) >= limit or round_index == _BOSS_RECOMMENDATION_ROUNDS - 1:
+                break
+            cdp.evaluate(
+                "window.scrollBy(0, Math.max(window.innerHeight, 800)); window.scrollY",
+                session_id,
+            )
+            self._sleep(self._jitter(*self._search_delay))
+        return tuple(listings.values())[:limit]
 
     @staticmethod
-    def _source_query(preference: JobSearchPreference) -> str:
+    def _select_results(
+        search_results: tuple[RawJobListing, ...],
+        recommendation_results: tuple[RawJobListing, ...],
+        *,
+        mode: DiscoveryMode,
+        limit: int,
+    ) -> tuple[RawJobListing, ...]:
+        if mode is DiscoveryMode.SEARCH:
+            return search_results[:limit]
+        if mode is DiscoveryMode.RECOMMENDATION:
+            return recommendation_results[:limit]
+
+        recommendation_quota = max(1, limit // 2)
+        search_quota = limit - recommendation_quota
+        selected = [
+            *recommendation_results[:recommendation_quota],
+            *search_results[:search_quota],
+            *recommendation_results[recommendation_quota:],
+            *search_results[search_quota:],
+        ]
+        merged: dict[tuple[JobSource, str], RawJobListing] = {}
+        for item in selected:
+            identity = (item.source, item.external_id)
+            previous = merged.get(identity)
+            if previous is None:
+                merged[identity] = item
+                continue
+            channels = tuple(
+                dict.fromkeys((*previous.acquisition_channels, *item.acquisition_channels))
+            )
+            merged[identity] = previous.model_copy(update={"acquisition_channels": channels})
+        return tuple(merged.values())[:limit]
+
+    @staticmethod
+    def _source_query(
+        preference: JobSearchPreference,
+        *,
+        query: str | None = None,
+    ) -> str:
         """Add an explicit source keyword for employment types BOSS may ignore."""
-        query = preference.query.strip()
-        normalized = query.casefold()
+        source_query = (query or preference.query).strip()
+        normalized = source_query.casefold()
         suffix = ""
         if EmploymentType.INTERNSHIP in preference.employment_types and not any(
             marker in normalized for marker in ("实习", "intern")
         ):
             suffix = "实习"
-        elif EmploymentType.PART_TIME in preference.employment_types and "兼职" not in query:
+        elif EmploymentType.PART_TIME in preference.employment_types and "兼职" not in source_query:
             suffix = "兼职"
-        return f"{query} {suffix}".strip()
+        return f"{source_query} {suffix}".strip()
 
     def fetch_details(self, links: tuple[JobSourceLink, ...]) -> tuple[DetailFetchResult, ...]:
         """Fetch at most ten details serially, with jitter and a risk-control circuit breaker."""
@@ -392,7 +562,9 @@ class BossConnector:
         )
 
     @staticmethod
-    def _to_listing(item: dict[str, Any]) -> RawJobListing:
+    def _to_listing(
+        item: dict[str, Any], *, channel: DiscoveryChannel = DiscoveryChannel.SEARCH
+    ) -> RawJobListing:
         values = dict(item)
         source_employment_type = str(values.pop("employment_type", ""))
         source_company_size = str(values.pop("company_size", ""))
@@ -402,4 +574,8 @@ class BossConnector:
             str(values.get("description", "")),
         )
         values["company_size"] = parse_company_size(source_company_size)
-        return RawJobListing(source=JobSource.BOSS, **values)
+        return RawJobListing(
+            source=JobSource.BOSS,
+            acquisition_channels=(channel,),
+            **values,
+        )

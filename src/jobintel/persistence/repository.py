@@ -133,8 +133,8 @@ class SQLiteJobRepository:
                     INSERT INTO discovery_runs (
                         run_id, candidate_id, profile_version, preference_json,
                         total_discovered, duplicates_removed, filtered_out,
-                        schema_version, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        profile_snapshot_json, schema_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.run_id,
@@ -144,6 +144,11 @@ class SQLiteJobRepository:
                         run.total_discovered,
                         run.duplicates_removed,
                         run.filtered_out,
+                        _canonical_json(
+                            run.profile_snapshot.model_dump(mode="json")
+                            if run.profile_snapshot is not None
+                            else {}
+                        ),
                         run.schema_version,
                         run.created_at.isoformat(),
                     ),
@@ -170,8 +175,9 @@ class SQLiteJobRepository:
                         """
                         INSERT INTO discovery_run_jobs (
                             run_id, discovery_job_id, rank_order, rank_score,
-                            matched_terms_json, job_snapshot_json, job_content_sha256
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            matched_terms_json, rank_explanation_json,
+                            job_snapshot_json, job_content_sha256
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             run.run_id,
@@ -179,6 +185,22 @@ class SQLiteJobRepository:
                             rank_order,
                             hit.rank_score,
                             _canonical_json(hit.matched_terms),
+                            _canonical_json(
+                                {
+                                    "matched_query_terms": hit.matched_query_terms,
+                                    "matched_profile_skills": hit.matched_profile_skills,
+                                    "matched_evidence": [
+                                        item.model_dump(mode="json")
+                                        for item in hit.matched_evidence
+                                    ],
+                                    "rank_breakdown": (
+                                        hit.rank_breakdown.model_dump(mode="json")
+                                        if hit.rank_breakdown is not None
+                                        else None
+                                    ),
+                                    "is_new_to_candidate": hit.is_new_to_candidate,
+                                }
+                            ),
                             _canonical_json(hit.job.model_dump(mode="json")),
                             discovered_job_content_sha256(hit.job),
                         ),
@@ -323,7 +345,8 @@ class SQLiteJobRepository:
         ).fetchall()
         hit_rows = self._conn.execute(
             """
-            SELECT j.*, r.rank_score, r.matched_terms_json, r.job_snapshot_json
+            SELECT j.*, r.rank_score, r.matched_terms_json,
+                   r.rank_explanation_json, r.job_snapshot_json
             FROM discovery_run_jobs r
             JOIN discovered_jobs j ON j.discovery_job_id = r.discovery_job_id
             WHERE r.run_id = ? ORDER BY r.rank_order
@@ -335,6 +358,7 @@ class SQLiteJobRepository:
             values = dict(hit_row)
             rank_score = values.pop("rank_score")
             matched_terms = json.loads(values.pop("matched_terms_json"))
+            rank_explanation = json.loads(values.pop("rank_explanation_json"))
             snapshot = values.pop("job_snapshot_json")
             if snapshot:
                 job_values = json.loads(snapshot)
@@ -347,6 +371,7 @@ class SQLiteJobRepository:
                     job=DiscoveredJob.model_validate(job_values),
                     rank_score=rank_score,
                     matched_terms=matched_terms,
+                    **rank_explanation,
                 )
             )
         return DiscoveryRun(
@@ -362,6 +387,11 @@ class SQLiteJobRepository:
             total_discovered=row["total_discovered"],
             duplicates_removed=row["duplicates_removed"],
             filtered_out=row["filtered_out"],
+            profile_snapshot=(
+                json.loads(row["profile_snapshot_json"])
+                if row["profile_snapshot_json"] != "{}"
+                else None
+            ),
             schema_version=row["schema_version"],
             created_at=row["created_at"],
         )
@@ -389,6 +419,20 @@ class SQLiteJobRepository:
                 (candidate_id, limit),
             ).fetchall()
         return tuple(self.get_discovery_run(str(row["run_id"])) for row in rows)
+
+    def list_candidate_seen_discovery_job_ids(self, candidate_id: str) -> tuple[str, ...]:
+        """Return canonical jobs already shown in persisted runs for one candidate."""
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT rj.discovery_job_id
+            FROM discovery_run_jobs AS rj
+            JOIN discovery_runs AS dr ON dr.run_id = rj.run_id
+            WHERE dr.candidate_id = ?
+            ORDER BY rj.discovery_job_id
+            """,
+            (candidate_id,),
+        ).fetchall()
+        return tuple(str(row["discovery_job_id"]) for row in rows)
 
     def find_discovered_job(self, discovery_job_id: str) -> DiscoveredJob | None:
         """Return a cached canonical job snapshot when it exists."""
@@ -922,19 +966,61 @@ class SQLiteJobRepository:
             for row in rows
         )
 
-    def dashboard_counts(self) -> dict[str, int]:
-        """Return compact aggregate counts for the local web dashboard."""
-        tables = {
-            "candidates": "SELECT COUNT(DISTINCT candidate_id) FROM candidate_profiles",
-            "discoveries": "SELECT COUNT(*) FROM discovery_runs",
-            "jobs": "SELECT COUNT(*) FROM discovered_jobs",
-            "analyses": "SELECT COUNT(*) FROM application_analyses",
-            "radar_checks": "SELECT COUNT(*) FROM radar_checks",
-            "outreach_drafts": "SELECT COUNT(*) FROM outreach_drafts",
-        }
+    def dashboard_counts(self, *, candidate_id: str | None = None) -> dict[str, int]:
+        """Return aggregate counts globally or within one candidate's data scope."""
+        if candidate_id is None:
+            statements: dict[str, tuple[str, tuple[object, ...]]] = {
+                "candidates": (
+                    "SELECT COUNT(DISTINCT candidate_id) FROM candidate_profiles",
+                    (),
+                ),
+                "discoveries": ("SELECT COUNT(*) FROM discovery_runs", ()),
+                "jobs": ("SELECT COUNT(*) FROM discovered_jobs", ()),
+                "analyses": ("SELECT COUNT(*) FROM application_analyses", ()),
+                "radar_checks": ("SELECT COUNT(*) FROM radar_checks", ()),
+                "outreach_drafts": ("SELECT COUNT(*) FROM outreach_drafts", ()),
+            }
+        else:
+            parameter = (candidate_id,)
+            statements = {
+                "candidates": (
+                    "SELECT COUNT(DISTINCT candidate_id) FROM candidate_profiles "
+                    "WHERE candidate_id = ?",
+                    parameter,
+                ),
+                "discoveries": (
+                    "SELECT COUNT(*) FROM discovery_runs WHERE candidate_id = ?",
+                    parameter,
+                ),
+                "jobs": (
+                    """
+                    SELECT COUNT(DISTINCT rj.discovery_job_id)
+                    FROM discovery_run_jobs AS rj
+                    JOIN discovery_runs AS r ON r.run_id = rj.run_id
+                    WHERE r.candidate_id = ?
+                    """,
+                    parameter,
+                ),
+                "analyses": (
+                    "SELECT COUNT(*) FROM application_analyses WHERE candidate_id = ?",
+                    parameter,
+                ),
+                "radar_checks": (
+                    """
+                    SELECT COUNT(*) FROM radar_checks AS rc
+                    JOIN discovery_runs AS r ON r.run_id = rc.run_id
+                    WHERE r.candidate_id = ?
+                    """,
+                    parameter,
+                ),
+                "outreach_drafts": (
+                    "SELECT COUNT(*) FROM outreach_drafts WHERE candidate_id = ?",
+                    parameter,
+                ),
+            }
         return {
-            name: int(self._conn.execute(statement).fetchone()[0])
-            for name, statement in tables.items()
+            name: int(self._conn.execute(statement, parameters).fetchone()[0])
+            for name, (statement, parameters) in statements.items()
         }
 
     # --- reviewed HR outreach ------------------------------------------------
